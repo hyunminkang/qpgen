@@ -38,6 +38,13 @@ message(STATUS ${QGEN_LIBRARIES})
 
 include_directories(. simde/ ${HTS_INCLUDE_DIRS} ${QGEN_INCLUDE_DIRS})
 
+set(APP_FILES
+    qpgentools.cpp
+    qpgentools.h
+    cmd_test_qpgen.cpp
+    cmd_match_plp_geno.cpp
+)
+
 set(SOURCE_FILES
     qpgen.cpp
     qpgen.h
@@ -349,10 +356,10 @@ set(SOURCE_FILES
 
 ADD_LIBRARY(qpgen STATIC ${SOURCE_FILES})
 
-SET(APP_EXE test_qpgen)
+SET(APP_EXE qpgentools)
 
 #find_package(OpenMP REQUIRED)
-ADD_EXECUTABLE(${APP_EXE} ${SOURCE_FILES} test_qpgen.cpp)
+ADD_EXECUTABLE(${APP_EXE} ${SOURCE_FILES} ${APP_FILES})
 
 find_library(ZLIB z HINTS /usr/lib/x86_64-linux-gnu/ /usr/lib/ /usr/lib64/)
 if(NOT ZLIB)
@@ -390,7 +397,7 @@ if(NOT CRYPTOLIB)
     message(FATAL_ERROR "libcrypto library not found")
 endif()
 
-TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
+TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 #target_compile_options(${APP_EXE} PRIVATE "${OpenMP_CXX_FLAGS}")
 
 

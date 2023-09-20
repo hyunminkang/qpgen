@@ -50,3 +50,4 @@ htslib
 bin
 
 .DS_Store
+.vscode/

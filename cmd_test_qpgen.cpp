@@ -2,7 +2,7 @@
 #include "qgenlib/tsv_reader.h"
 #include "qpgen.h"
 
-int32_t main(int32_t argc, char** argv) {
+int32_t test_qpgen(int32_t argc, char** argv) {
   std::string prefix;
   paramList pl;
 
@@ -31,7 +31,7 @@ int32_t main(int32_t argc, char** argv) {
   notice("Total sample size = %d", pr.samps.size());
 
   // read the first variant and genotype
-  if ( pr.read_genos() ) {
+  if ( pr.stream_genos() ) {
     notice("Successfully read the first variant");
     std::map<int32_t, uint32_t> cntmap;
     for(int32_t i=0; i < pr.int_buf.size(); ++i) {

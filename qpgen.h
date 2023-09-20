@@ -85,15 +85,23 @@ public:
     //bool move_var_idx(uint32_t new_var_idx);
     //bool move_var_pos(const char* chrom, uint32_t pos);
 
+    int32_t get_variant_idx_from_cpra(const std::vector<std::string>& var_cpra, std::vector<int32_t>& variant_idx);
+    int32_t pvar_cpra2idx(std::map<std::string, int32_t>& cpra2idx, std::vector<int32_t>& variant_idx);
+    int32_t bim_cpra2idx(std::map<std::string, int32_t>& cpra2idx, std::vector<int32_t>& variant_idx);
+
+    bool get_bed_genos_at(int32_t var_idx);
+    bool get_pgen_genos_at(int32_t var_idx);
+    bool get_genos_at(int32_t var_idx) { if (mode_bed) return get_bed_genos_at(var_idx); else return get_pgen_genos_at(var_idx); }
+
     // function to load genotypes - should be done after prep and filter
-    bool read_pgen_genos(); // read one marker at a time
-    bool read_bed_genos();
-    bool read_genos() { if (mode_bed) return read_bed_genos(); else return read_pgen_genos(); }
+    bool stream_pgen_genos(); // read one marker at a time
+    bool stream_bed_genos();
+    bool stream_genos() { if (mode_bed) return stream_bed_genos(); else return stream_pgen_genos(); }
 
     bool load_psam(const char* _psamf);
     bool load_fam(const char* _famf);
-    bool read_pvar();
-    bool read_bim();
+    bool stream_pvar();
+    bool stream_bim();
 };
 
 #endif // __QPGEN_H
