@@ -4,13 +4,15 @@
 
 int32_t test_qpgen(int32_t argc, char** argv);
 int32_t match_plp_geno(int32_t argc, char** argv);
+int32_t join_plp_geno(int32_t argc, char** argv);
  
 int32_t main(int32_t argc, char** argv) {
   commandList cl;
 
   BEGIN_LONG_COMMANDS(longCommandlines)
     LONG_COMMAND_GROUP("Utilities for multi-omics", NULL)
-    LONG_COMMAND("match-plp-geno", &match_plp_geno, "Check the concorance between pileup and genotypes")
+    LONG_COMMAND("match-plp-geno", &match_plp_geno, "Check the concordance between pileup and genotypes")
+    LONG_COMMAND("join-plp-geno",  &join_plp_geno, "Join the pileup and individual genotypes")
 
     LONG_COMMAND_GROUP("Other Utilities", NULL)
     LONG_COMMAND("test-qpgen", &test_qpgen, "Test software to check the qpgen library")

@@ -43,6 +43,7 @@ set(APP_FILES
     qpgentools.h
     cmd_test_qpgen.cpp
     cmd_match_plp_geno.cpp
+    cmd_join_plp_geno.cpp
 )
 
 set(SOURCE_FILES
