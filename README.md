@@ -1,28 +1,47 @@
 # qpgen
-Libraries and Command Line Tooles for PLINK files
+Libraries and Command Line Tools for PLINK files
 
 ## Overview
 
-`qpgen` is a collection of C++ libraries and tools to help analysis involving PLINK-formatted files.
+`qpgen` is a collection of C++ libraries and tools to help analysis involving PLINK-formatted files. This repository is under development and is not fully documented yet.
 
 ## Installing qpgen
 
-Before installing `qpgen`, you need to install
-[htslib](https://github.com/samtools/htslib) and
-[qgenlib](https://github.com/hyunminkang/qgenlib) and
-in the same directory you
-want to install `qpgen' (i.e. `qpgen`, `qgenlib`, and `htslib` should be
-siblings directories). You also need [cmake](https://cmake.org/) installed in your system.
+You can install `qpgen` by following the instructions below.
 
-After installing `htslib`, you can clone the current snapshot of this repository to install as well
+```bash
+## clone the repository
+git clone --recursive https://github.com/hyunminkang/qpgen.git
+cd qpgen
 
-<pre>
-$ mkdir build
+## build the submodules
+cd submodules
+sh -x build.sh
+cd ..
 
-$ cd build
+## build qpgen
+mkdir build
+cd build
+cmake ..
+make
 
-$ cmake ..
-</pre>
+## list available package
+../bin/qpgentools --help
+```
+
+To see the usage of individual commands, type:
+
+```bash
+../bin/qpgentools [command] --help
+```
+
+To see the compiled library, type:
+
+```bash
+ls -l ../lib/libqpgen.a
+```
+
+## Advanced Options for Installation
 
 In case any required libraries is missing, you may specify customized installing path by replacing "cmake .." with:
 
@@ -41,19 +60,4 @@ Finally, to build the binary, run
 
 <pre>
 $ make
-</pre>
-
-### List of test applications contained in `qgenlib`
-
-`qpgen` contains many in-house C++ tools that are currently under
-the hood development phase. To list the available commands of tools, type:
-
-<pre>
-test_qpgen --help
-</pre>
-
-To see the usage of individual commands, type:
-
-<pre>
-test_qpgen [command] --help
 </pre>

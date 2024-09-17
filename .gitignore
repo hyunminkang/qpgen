@@ -46,8 +46,10 @@ test/*
 cmake-build-debug/
 build
 lib
-htslib
 bin
 
 .DS_Store
+site/
+site/*
 .vscode/
+.vscode/*
