@@ -29,7 +29,7 @@ endif()
 
 message(STATUS ${QGEN_INCLUDE_DIRS})
 
-find_library(QGEN_LIBRARIES libqgen.a  HINTS /usr/lib/x86_64-linux-gnu/ /usr/lib/ /usr/lib64/ submodules/qgenlib ../qgenlib/lib/)
+find_library(QGEN_LIBRARIES libqgen.a  HINTS /usr/lib/x86_64-linux-gnu/ /usr/lib/ /usr/lib64/ submodules/qgenlib/lib/ ../qgenlib/lib/)
 if(NOT QGEN_LIBRARIES)
     message(FATAL_ERROR "libqgen QGEN_LIBRARIES not found")
 endif()
