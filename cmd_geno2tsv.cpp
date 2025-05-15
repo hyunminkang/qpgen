@@ -184,16 +184,16 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
                     switch (pr.int_buf[i])
                     {
                     case 0:
-                        hprintf(wh, "%d:2", i);
+                        hprintf(wh, "\t%d:2", i);
                         break;
                     case 1:
-                        hprintf(wh, "%d:1", i);
+                        hprintf(wh, "\t%d:1", i);
                         break;
                     case 2:
                         //hprintf(wh, "0");
                         break;
                     default: // missing
-                        hprintf(wh, "%d:NA", i);
+                        hprintf(wh, "\t%d:NA", i);
                         break;
                     }
                 }
@@ -202,21 +202,19 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
             else {
                 for (int32_t i = 0; i < nsamps; ++i)
                 {
-                    if (tr_var.nfields + i > 1)
-                        hprintf(wh, "\t");
                     switch (pr.int_buf[i])
                     {
                     case 0:
-                        hprintf(wh, "2");
+                        hprintf(wh, "\t2");
                         break;
                     case 1:
-                        hprintf(wh, "1");
+                        hprintf(wh, "\t1");
                         break;
                     case 2:
-                        hprintf(wh, "0");
+                        hprintf(wh, "\t0");
                         break;
                     default: // missing
-                        hprintf(wh, "NA");
+                        hprintf(wh, "\tNA");
                         break;
                     }
                 }
