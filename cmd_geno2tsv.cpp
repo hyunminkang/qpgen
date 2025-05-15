@@ -14,12 +14,15 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
     std::string samplist;
     std::string sampf;
     std::string outf;
+    int32_t ibegin = 0;
     //bool dosage = false;
+    bool sparse = false;
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
     LONG_PARAM_GROUP("Input variant info", NULL)
-    LONG_STRING_PARAM("var", &varf, "Input variant file (TSV) containing [0-based variant index] [extra columns]")
+    LONG_STRING_PARAM("var", &varf, "Input variant file (TSV) containing [variant index] [extra columns]")
+    LONG_INT_PARAM("idx-begin", &ibegin, "Starting index for the variant (default: 0). Use 1 for 1-based index")
 
     LONG_PARAM_GROUP("Input genotypes", NULL)
     LONG_STRING_PARAM("pfile", &pfile, "Input PLINK 2.0 file prefix (PGEN format)")
@@ -29,6 +32,7 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
 
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
+    LONG_PARAM("sparse", &sparse, "Output sparse representation [IDX]:[GENO] instead of full genotypes")
     //LONG_PARAM("dosage", &dosage, "Output dosage instead of genotypes (default: genotypes). Only available for PGEN format")
     END_LONG_PARAMS();
 
@@ -109,11 +113,12 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
                         hprintf(wh, "\t");
                     hprintf(wh, "%s", tr_var.str_field_at(i));
                 }
+                if (tr_var.nfields > 1)
+                    hprintf(wh, "\t");
+                hprintf(wh, "AC\tAN");
                 for (int32_t i = 0; i < nsamps; ++i)
                 {
-                    if (tr_var.nfields + i > 1)
-                        hprintf(wh, "\t");
-                    hprintf(wh, "%s", pr.samps[pr.samp_idx[i]-1].indID.c_str());
+                    hprintf(wh, "\t%s", pr.samps[pr.samp_idx[i]-1].indID.c_str());
                 }
                 hprintf(wh, "\n");
                 has_header = true;
@@ -127,11 +132,12 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
                     hprintf(wh, "\t");
                 hprintf(wh, "V%d", i);
             }
+            if (tr_var.nfields > 1)
+                hprintf(wh, "\t");
+            hprintf(wh, "AC\tAN");
             for (int32_t i = 0; i < nsamps; ++i)
             {
-                if (tr_var.nfields + i > 1)
-                    hprintf(wh, "\t");
-                hprintf(wh, "%s", pr.samps[pr.samp_idx[i]-1].indID.c_str());
+                hprintf(wh, "\t%s", pr.samps[pr.samp_idx[i]-1].indID.c_str());
             }
             hprintf(wh, "\n");
         }
@@ -139,8 +145,28 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
         { // data line
             // get the genotypes
             int32_t idx = tr_var.int_field_at(0);
-            if (!pr.get_genos_at(idx))
+            if (!pr.get_genos_at(idx - ibegin))
                 error("Failed to get genotypes for variant %d", idx);
+
+            int32_t ac = 0;
+            int32_t an = 0;
+            for (int32_t i = 0; i < nsamps; ++i)
+            {
+                switch (pr.int_buf[i])
+                {
+                case 0:
+                    an += 2;
+                    ac += 2;
+                    break;
+                case 1:
+                    an += 2;
+                    ++ac;
+                    break;
+                case 2:
+                    an += 2;
+                    break;
+                }
+            }
 
             // print the variant info
             for (int32_t i = 1; i < tr_var.nfields; ++i)
@@ -149,23 +175,53 @@ int32_t cmd_geno2tsv(int32_t argc, char **argv)
                     hprintf(wh, "\t");
                 hprintf(wh, "%s", tr_var.str_field_at(i));
             }
-            for (int32_t i = 0; i < nsamps; ++i)
-            {
-                if (tr_var.nfields + i > 1)
-                    hprintf(wh, "\t");
-                switch (pr.int_buf[i])
+            if (tr_var.nfields > 1)
+                hprintf(wh, "\t");
+            hprintf(wh, "%d\t%d", ac, an);
+            if ( sparse ) {
+                for (int32_t i = 0; i < nsamps; ++i)
                 {
-                case 0:
-                case 1:
-                case 2:
-                    hprintf(wh, "%d", pr.int_buf[i]);
-                    break;
-                default: // missing
-                    hprintf(wh, "NA");
-                    break;
+                    switch (pr.int_buf[i])
+                    {
+                    case 0:
+                        hprintf(wh, "%d:2", i);
+                        break;
+                    case 1:
+                        hprintf(wh, "%d:1", i);
+                        break;
+                    case 2:
+                        //hprintf(wh, "0");
+                        break;
+                    default: // missing
+                        hprintf(wh, "%d:NA", i);
+                        break;
+                    }
                 }
+                hprintf(wh, "\n");
             }
-            hprintf(wh, "\n");
+            else {
+                for (int32_t i = 0; i < nsamps; ++i)
+                {
+                    if (tr_var.nfields + i > 1)
+                        hprintf(wh, "\t");
+                    switch (pr.int_buf[i])
+                    {
+                    case 0:
+                        hprintf(wh, "2");
+                        break;
+                    case 1:
+                        hprintf(wh, "1");
+                        break;
+                    case 2:
+                        hprintf(wh, "0");
+                        break;
+                    default: // missing
+                        hprintf(wh, "NA");
+                        break;
+                    }
+                }
+                hprintf(wh, "\n");
+            }
         }
         ++nlines;
     }
