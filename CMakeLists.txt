@@ -38,12 +38,20 @@ message(STATUS ${QGEN_LIBRARIES})
 
 include_directories(. simde/ ${HTS_INCLUDE_DIRS} ${QGEN_INCLUDE_DIRS})
 
+if(APPLE)
+    message(STATUS "Configuring for macOS")
+    set(CMAKE_C_COMPILER "/opt/homebrew/opt/llvm/bin/clang")
+    set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
+endif()
+
+
 set(APP_FILES
     qpgentools.cpp
     qpgentools.h
     cmd_test_qpgen.cpp
     cmd_match_plp_geno.cpp
     cmd_join_plp_geno.cpp
+    cmd_geno2tsv.cpp
 )
 
 set(SOURCE_FILES
