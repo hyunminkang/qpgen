@@ -12,7 +12,7 @@
 // shared under GNU Lesser General Public License v3.0
 
 struct _plink_var_t {
-    int32_t ichrom;
+    //int32_t ichrom;
     std::string schrom;
     int32_t pos;
     std::string vid;
@@ -29,6 +29,70 @@ struct _plink_var_t {
 };
 typedef struct _plink_var_t plink_var_t;
 
+struct _cpra_t {
+    std::string chrom;
+    int32_t pos;
+    std::string ref;
+    std::string alts;
+
+    bool operator<(const struct _cpra_t& other) const {
+        if ( chrom < other.chrom ) return true;
+        if ( chrom > other.chrom ) return false;
+        if ( pos < other.pos ) return true;
+        if ( pos > other.pos ) return false;
+        if ( ref < other.ref ) return true;
+        if ( ref > other.ref ) return false;
+        return alts < other.alts; // compare alts last
+    }
+
+    std::string to_string(char delim = ':') const {
+        std::string s;
+        s.append(chrom);
+        s.push_back(delim);
+        s.append(std::to_string(pos));
+        s.push_back(delim);
+        s.append(ref);
+        s.push_back(delim);
+        s.append(alts);
+        return s;
+    }
+
+    _cpra_t(const char* s, char delim = ':') {
+        const char* p = strchr(s, delim);
+        if ( p == NULL ) {
+            error("Invalid CPRA format: %s", s);
+        }
+        chrom.assign(s, p - s);
+        s = p + 1;
+        p = strchr(s, delim);
+        if ( p == NULL ) {
+            error("Invalid CPRA format: %s", s);
+        }
+        pos = atoi(s);
+        s = p + 1;
+        p = strchr(s, delim);
+        if ( p == NULL ) {
+            error("Invalid CPRA format: %s", s);
+        }
+        ref.assign(s, p - s);
+        s = p + 1;
+        if ( *s == '\0' ) {
+            error("Invalid CPRA format: %s", s);
+        }
+        else {
+            alts.assign(s); // the rest is alt alleles
+        }
+        // while ( ( p = strchr(s, ',') ) != NULL ) {
+        //     alts.push_back(std::string(s, p - s));
+        //     s = p + 1;
+        // }
+        // if ( *s != '\0' ) { // last alt
+        //     alts.push_back(s);
+        // }
+    }
+};
+typedef struct _cpra_t cpra_t;
+
 struct _plink_samp_t {
     std::string famID;
     std::string indID;
@@ -39,6 +103,45 @@ struct _plink_samp_t {
 };
 
 typedef struct _plink_samp_t plink_samp_t;
+
+// PLINK 2.0 reader with indexed pvar
+class PgenIdxReader {
+public:
+    PgenReader pgr;
+    int32_t nthreads;
+    tsv_reader tr_pivar; // read tabixed/indexed pvar file
+    double* dbl_buf;
+    std::vector<int32_t> int_buf;
+
+    std::string pgenf;
+    std::string psamf;
+    std::string pivarf;
+
+    // internal variables
+    std::vector<plink_samp_t> samps;           // sample IDs -- fully loaded in memory 
+    std::map<std::string, uint32_t> samp2idx;  // sample ID maps
+    std::vector<int32_t> samp_idx;             // sample indices to load 
+
+    int jump_thres_bp;
+
+    bool pivar_loaded;
+    bool pgen_loaded;
+    plink_var_t cur_var;  // current variant information
+    int32_t cur_var_idx;  // current variant index
+
+    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), jump_thres_bp(10000) {}
+
+    // functions to load ALL sample and FIRST variant info
+    bool prep_pgen(const char* _pgenf, const char* _pivarf, const char* _psamf);
+
+    // functions to set filters for samples and variants - should run after prep
+    void set_filter_sample_id(std::vector<std::string>& samp_ids, bool exclude = false);
+
+    bool read_pivar(const char* cpra = NULL); // change the current variant position to a specific CPRA
+    bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position
+
+    bool load_psam(const char* _psamf);
+};
 
 class PlinkReader {
 public:

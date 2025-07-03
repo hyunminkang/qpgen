@@ -4,3 +4,6 @@
 [submodule "submodules/htslib"]
 	path = submodules/htslib
 	url = https://github.com/samtools/htslib
+[submodule "submodules/eigen"]
+	path = submodules/eigen
+	url = https://gitlab.com/libeigen/eigen.git

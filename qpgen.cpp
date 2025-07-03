@@ -409,3 +409,195 @@ bool PlinkReader::get_pgen_genos_at(int32_t var_idx) {
     pgr.ReadIntHardcalls(int_buf, 0, var_idx, 0);
     return true;
 }
+
+bool PgenIdxReader::prep_pgen(const char* _pgenf, const char* _pivarf, const char* _psamf) {
+    // read the sample file first
+    if ( !load_psam(_psamf) ) {
+        error("Cannot parse the sample info at %s", _psamf);
+    }
+
+    pgenf.assign(_pgenf);
+    psamf.assign(_psamf);
+    pivarf.assign(_pivarf);
+
+    // DO NOT LOAD the genotype file yet    
+    return true;
+}
+
+bool PgenIdxReader::load_psam(const char* _psamf) {
+    tsv_reader tr_ind;
+
+    if ( !tr_ind.open(_psamf) ) { // return false if file cannot be opened
+        return false;
+    }
+
+    bool has_header = false;
+    uint32_t nsamps = 0;
+    int32_t idx_fid = -1, idx_iid = -1, idx_pat = -1, idx_mat = -1, idx_sex = -1, idx_pheno = -1;
+    samps.clear();
+    samp2idx.clear();
+    while( tr_ind.read_line() ) {
+        if ( ( nsamps == 0 ) && ( !has_header ) ) { // first line to process
+            if ( tr_ind.str_field_at(0)[0] == '#' ) {  // If header column exists
+                for(int32_t i=0; i < tr_ind.nfields; ++i) {
+                    const char* str = tr_ind.str_field_at(i) + ( i == 0 ? 1 : 0 );
+                    if ( strcmp("FID", str) == 0 ) { idx_fid = i; }
+                    else if ( strcmp("IID", str) == 0 ) { idx_iid = i; }
+                    else if ( strcmp("PAT", str) == 0 ) { idx_pat = i; }
+                    else if ( strcmp("MAT", str) == 0 ) { idx_mat = i; }
+                    else if ( strcmp("SEX", str) == 0 ) { idx_sex = i; }
+                    else if ( strcmp("PHENO", str) == 0 ) { idx_pheno = i; }
+                }
+                has_header = true;
+
+                //notice("%d %d %d %d %d %d", idx_fid, idx_iid, idx_pat, idx_mat, idx_sex, idx_pheno);
+                continue;
+            }
+            else {  // if header column does not exist, use the default order
+                idx_fid = tr_ind.nfields > 0 ? 0 : -1;
+                idx_iid = tr_ind.nfields > 1 ? 1 : -1;
+                idx_pat = tr_ind.nfields > 2 ? 2 : -1;
+                idx_mat = tr_ind.nfields > 3 ? 3 : -1;
+                idx_sex = tr_ind.nfields > 4 ? 4 : -1;
+                idx_pheno = tr_ind.nfields > 5 ? 5 : -1;
+            }
+        }
+
+        // create a sample 
+        plink_samp_t samp;
+        if ( idx_fid >= 0 ) { samp.famID.assign(tr_ind.str_field_at(idx_fid)); } 
+        if ( idx_iid >= 0 ) { samp.indID.assign(tr_ind.str_field_at(idx_iid)); }
+        if ( idx_pat >= 0 ) { samp.dadID.assign(tr_ind.str_field_at(idx_pat)); }
+        if ( idx_mat >= 0 ) { samp.momID.assign(tr_ind.str_field_at(idx_mat)); }
+        if ( idx_sex >= 0 ) { samp.sex = tr_ind.int_field_at(idx_sex); }
+        if ( idx_pheno >= 0 ) { samp.pheno = tr_ind.double_field_at(idx_pheno); } 
+
+        // add the sample to the list
+        samps.push_back(samp);
+        std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
+        samp2idx[iid] = nsamps;
+        //error("%s %s %s %d %d", iid.c_str(), samp.famID.c_str(), samp.indID.c_str(), idx_fid, idx_sex);
+        ++nsamps;
+    }
+
+    // fill in the sample indices to load
+    for(uint32_t i=0; i < nsamps; ++i) {
+        samp_idx.push_back((int32_t)(i+1));
+    }
+
+    return nsamps > 0;
+}
+
+void PgenIdxReader::set_filter_sample_id(std::vector<std::string>& samp_ids, bool exclude) {
+    samp_idx.clear();
+
+    std::set<uint32_t> idxset;
+    for(int32_t i=0; i < samp_ids.size(); ++i) {
+        std::map<std::string, uint32_t>::iterator it = samp2idx.find(samp_ids[i]);
+        if ( it != samp2idx.end() ) {
+            idxset.insert(it->second);
+        }
+    }
+
+    for(uint32_t i=0; i < samps.size(); ++i) {
+        if ( exclude ) {
+            if ( idxset.find(i) == idxset.end() ) {
+                samp_idx.push_back(i+1);
+            }
+        }
+        else {
+            if ( idxset.find(i) != idxset.end() ) {
+                samp_idx.push_back(i+1);
+            }
+        }
+    }
+
+    if ( samp_idx.empty() ) {
+        error("No samples to be included after subsetting to %zu", samp_ids.size());
+    }
+}
+
+bool PgenIdxReader::read_pivar(const char* cpra) {
+    // load the variant file if not loaded
+    if ( !pivar_loaded ) {
+        if ( !tr_pivar.open(pivarf.c_str()) ) { // return false if file cannot be opened
+            error("Cannot open %s", pivarf.c_str());
+            return false;
+        } 
+        pivar_loaded = true;
+    }
+
+    if ( cpra != NULL ) {
+        cpra_t cpra_obj(cpra);
+        // check if we need to a jump of streaming
+        if ( cur_var_idx < 0 || 
+             cur_var.schrom.compare(cpra_obj.chrom) != 0 || 
+             cur_var.pos > cpra_obj.pos || 
+             cpra_obj.pos - cur_var.pos > jump_thres_bp ) {
+            tr_pivar.jump_to(cpra_obj.chrom.c_str(), cpra_obj.pos);
+        }
+        while( tr_pivar.read_line() ) { // find the variant
+            if ( tr_pivar.nfields < 9 ) {
+                error("Invalid pvar file format at %s", pivarf.c_str());
+                return false;
+            }
+            const char* chrom = tr_pivar.str_field_at(0);
+            int32_t pos = tr_pivar.int_field_at(1);
+            const char* ref = tr_pivar.str_field_at(3);
+            const char* alts = tr_pivar.str_field_at(4);
+            if ( cpra_obj.chrom.compare(chrom) == 0 && 
+                 pos == cpra_obj.pos && 
+                 cpra_obj.ref.compare(ref) == 0 &&
+                 cpra_obj.alts.compare(alts) == 0 ) {
+                // found the variant
+                cur_var.schrom.assign(chrom);
+                cur_var.pos = pos;
+                cur_var.vid.assign(tr_pivar.str_field_at(2));
+                cur_var.ref.assign(ref);
+                split(cur_var.alts, ",", alts);
+                cur_var_idx = tr_pivar.int_field_at(8)-1; 
+                return true;
+            }
+            else if ( cpra_obj.chrom.compare(chrom) != 0 || pos > cpra_obj.pos ) {
+                return false; // variant not found
+            }
+        }
+    }
+    else { // read the next variant
+        while( tr_pivar.read_line() ) { // find the variant
+            const char* chrom = tr_pivar.str_field_at(0);
+            if ( chrom[0] == '#' ) continue;
+
+            if ( tr_pivar.nfields < 9 ) {
+                error("Invalid pvar file format at %s", pivarf.c_str());
+                return false;
+            }
+
+            int32_t pos = tr_pivar.int_field_at(1);
+            const char* ref = tr_pivar.str_field_at(3);
+            const char* alts = tr_pivar.str_field_at(4);
+
+            cur_var.schrom.assign(chrom);
+            cur_var.pos = pos;
+            cur_var.vid.assign(tr_pivar.str_field_at(2));
+            cur_var.ref.assign(ref);
+            split(cur_var.alts, ",", alts);
+            cur_var_idx = tr_pivar.int_field_at(8)-1; 
+            return true;
+        }
+    }
+    return true;
+}
+
+bool PgenIdxReader::get_genos(int32_t var_idx) {
+    // load the genotypes if needed
+    if ( !pgen_loaded ) {
+        notice("Loading pgen file %s with %zu/%zu samples", pgenf.c_str(), samp_idx.size(), samps.size());
+        pgr.Load(pgenf, (int32_t)samps.size(), samp_idx, nthreads);
+        pgen_loaded = true;
+    }
+
+    // read the genotypes, read as integers
+    pgr.ReadIntHardcalls(int_buf, 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+    return true;
+}

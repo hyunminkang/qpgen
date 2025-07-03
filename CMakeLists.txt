@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8...3.23)
 project(qpgen)
 
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -pthread -std=c++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -pthread -std=c++14")
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/lib")
@@ -36,7 +36,16 @@ endif()
 
 message(STATUS ${QGEN_LIBRARIES})
 
-include_directories(. simde/ ${HTS_INCLUDE_DIRS} ${QGEN_INCLUDE_DIRS})
+# Eigen
+set(EIGEN3_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/submodules/eigen")
+if (NOT EXISTS "${EIGEN3_INCLUDE_DIR}/Eigen/Dense")
+    message(FATAL_ERROR "Eigen submodule missing. Did you run 'git submodule update --init'?")
+endif()
+add_library(Eigen3::Eigen INTERFACE IMPORTED)
+set_target_properties(Eigen3::Eigen PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${EIGEN3_INCLUDE_DIR}")
+
+
+include_directories(. simde/ ${HTS_INCLUDE_DIRS} ${QGEN_INCLUDE_DIRS} ${EIGEN3_INCLUDE_DIR})
 
 if(APPLE)
     message(STATUS "Configuring for macOS")
@@ -52,11 +61,14 @@ set(APP_FILES
     cmd_match_plp_geno.cpp
     cmd_join_plp_geno.cpp
     cmd_geno2tsv.cpp
+    cmd_pair_assoc.cpp
 )
 
 set(SOURCE_FILES
     qpgen.cpp
     qpgen.h
+    assoc_utils.h
+    assoc_utils.cpp
     include/pgenlib_misc.cc
     include/pgenlib_misc.h
     include/pgenlib_read.cc
@@ -406,7 +418,8 @@ if(NOT CRYPTOLIB)
     message(FATAL_ERROR "libcrypto library not found")
 endif()
 
-TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
+#TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
+TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE Eigen3::Eigen ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 #target_compile_options(${APP_EXE} PRIVATE "${OpenMP_CXX_FLAGS}")
 
 
