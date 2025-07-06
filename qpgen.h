@@ -126,12 +126,16 @@ protected:
 
     bool pivar_loaded;
     bool pgen_loaded;
+    bool dosage_present; // true if dosage is present in the pgen file
     plink_var_t cur_var;  // current variant information
     int32_t cur_var_idx;  // current variant index
     int32_t icol_pivar_idx; // column index for the variant ID in the pvar file (0-based)
 
 public:
-    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000) {}
+    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000), dosage_present(false) {}
+    ~PgenIdxReader() {
+        if ( dbl_buf ) free(dbl_buf);
+    }
 
     // functions to load ALL sample and FIRST variant info
     bool prep_pgen(const char* _pgenf, const char* _pivarf, const char* _psamf);
@@ -160,6 +164,7 @@ public:
 
     bool is_pivar_loaded() const { return pivar_loaded; }
     bool is_pgen_loaded() const { return pgen_loaded; }
+    bool is_dosage_present() const { return dosage_present; }
     const plink_var_t& get_current_variant() const { return cur_var; }
     int32_t get_current_variant_idx() const { return cur_var_idx; }
 

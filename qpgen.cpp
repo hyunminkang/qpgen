@@ -609,9 +609,16 @@ bool PgenIdxReader::get_genos(int32_t var_idx) {
         notice("Loading pgen file %s with %zu/%zu samples", pgenf.c_str(), samp_idx.size(), samps.size());
         pgr.Load(pgenf, (int32_t)samps.size(), samp_idx, nthreads);
         pgen_loaded = true;
+        dosage_present = pgr.DosagePresent();
+        dbl_buf = (double*)malloc(sizeof(double) * samp_idx.size());
     }
 
     // read the genotypes, read as integers
-    pgr.ReadIntHardcalls(int_buf, 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+    if ( dosage_present ) {
+        pgr.Read(dbl_buf, (size_t)samp_idx.size(), 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+    }
+    else {
+        pgr.ReadIntHardcalls(int_buf, 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+    }
     return true;
 }

@@ -421,8 +421,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
         // read the genotypes for each pair
         std::vector<cpra_t> v_cpra;
         std::vector<int32_t> ans;
-        std::vector<int32_t> acs;
+        std::vector<double> acs;
         const std::vector<int32_t>& int_buf = pr.get_int_buf();
+        const double* dbl_buf = pr.get_dbl_buf();
         // notice("int_buf.size() = %zu", int_buf.size());
         for(std::set<cpra_t>::iterator it = pairs.begin(); it != pairs.end(); ++it) {
             std::string cpra_s(it->to_string());
@@ -431,50 +432,67 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                 notice("Skipping pair %s\t%s, which is not found in the pvar file", it->to_string().c_str(), phe_trait_ids[phe_idx].c_str());
                 continue;
             }   
+            notice("Reading genotypes for variant %s", cpra_s.c_str());
             pr.get_genos();
+            notice("Finished reading genotypes for variant %s", cpra_s.c_str());
             // construct the input for association analysis
             if ( icol >= n_col_est ) {
                 geno_mat.conservativeResize(n_row, n_col_est * 2);
                 geno_mask.conservativeResize(n_row, n_col_est * 2);
                 n_col_est *= 2;
             }
-            int32_t an = 0, ac = 0;
-            for(int32_t i = 0; i < n_row; ++i) {
-                switch(int_buf[i]) { // make sure to convert 1-based index to 0-based
-                case 0:
-                    an += 2;
-                    ac += 2;
-                    break;
-                case 1:
-                    an += 2;
-                    ++ac;
-                    break;
-                case 2:
-                    an += 2;
-                    break;
+            int32_t an = 0;
+            double ac = 0;
+            if ( pr.is_dosage_present() ) {
+                if ( dbl_buf == NULL) {
+                    dbl_buf = pr.get_dbl_buf();
                 }
+                for(int32_t i =0; i < n_row; ++i) {
+                    //notice("Dosage[%d] = %.5g", i, dbl_buf[i]);
+                    geno_mat(i, icol) = 2.0-dbl_buf[i];
+                    geno_mask(i, icol) = true; // not missing
+                    ac += (2.0-dbl_buf[i]);
+                    an += 2;
+                }                 
             }
-            double mean = (double)ac / (double)an * 2.0;
-            //notice("mean = %.5g, an = %d, ac = %d", mean, an, ac);
-            for(int32_t i = 0; i < n_row; ++i) {
-                switch(int_buf[i]) {
-                case 0:
-                    geno_mat(i, icol) = 2.0 - mean; // homalt
-                    geno_mask(i, icol) = true; // not missing
-                    break;
-                case 1:
-                    geno_mat(i, icol) = 1.0 - mean; // het
-                    geno_mask(i, icol) = true; // not missing
-                    break;
-                case 2:
-                    geno_mat(i, icol) = 0.0 - mean; // homref
-                    geno_mask(i, icol) = true; // not missing
-                    break;
-                default:
-                    geno_mat(i, icol) = 0; // missing - mean imputation
-                    geno_mask(i, icol) = false; // missing
-                    ++n_geno_missing;
-                    break;
+            else {
+                for(int32_t i = 0; i < n_row; ++i) {
+                    switch(int_buf[i]) { // make sure to convert 1-based index to 0-based
+                    case 0:
+                        an += 2;
+                        ac += 2;
+                        break;
+                    case 1:
+                        an += 2;
+                        ++ac;
+                        break;
+                    case 2:
+                        an += 2;
+                        break;
+                    }
+                }
+                double mean = (double)ac / (double)an * 2.0;
+                //notice("mean = %.5g, an = %d, ac = %d", mean, an, ac);
+                for(int32_t i = 0; i < n_row; ++i) {
+                    switch(int_buf[i]) {
+                    case 0:
+                        geno_mat(i, icol) = 2.0 - mean; // homalt
+                        geno_mask(i, icol) = true; // not missing
+                        break;
+                    case 1:
+                        geno_mat(i, icol) = 1.0 - mean; // het
+                        geno_mask(i, icol) = true; // not missing
+                        break;
+                    case 2:
+                        geno_mat(i, icol) = 0.0 - mean; // homref
+                        geno_mask(i, icol) = true; // not missing
+                        break;
+                    default:
+                        geno_mat(i, icol) = 0; // missing - mean imputation
+                        geno_mask(i, icol) = false; // missing
+                        ++n_geno_missing;
+                        break;
+                    }
                 }
             }
             v_cpra.push_back(*it); 
