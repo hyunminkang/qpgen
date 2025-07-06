@@ -115,9 +115,10 @@ bool PlinkReader::load_psam(const char* _psamf) {
         // add the sample to the list
         samps.push_back(samp);
         std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
+        ++nsamps;
         samp2idx[iid] = nsamps;
         //error("%s %s %s %d %d", iid.c_str(), samp.famID.c_str(), samp.indID.c_str(), idx_fid, idx_sex);
-        ++nsamps;
+        //++nsamps;
     }
 
     // fill in the sample indices to load
@@ -151,8 +152,9 @@ bool PlinkReader::load_fam(const char* _famf) {
         samps.push_back(samp);
         std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
         //std::string iid = samp.famID.empty() ? samp.indID : samp.famID + "_" + samp.indID;
-        samp2idx[iid] = nsamps;
         ++nsamps;
+        samp2idx[iid] = nsamps;
+        //++nsamps;
     }
 
     // fill in the sample indices to load
@@ -167,7 +169,7 @@ void PlinkReader::set_filter_sample_id(std::vector<std::string>& samp_ids, bool 
 
     std::set<uint32_t> idxset;
     for(int32_t i=0; i < samp_ids.size(); ++i) {
-        std::map<std::string, uint32_t>::iterator it = samp2idx.find(samp_ids[i]);
+        std::map<std::string, int32_t>::iterator it = samp2idx.find(samp_ids[i]);
         if ( it != samp2idx.end() ) {
             idxset.insert(it->second);
         }
@@ -175,12 +177,12 @@ void PlinkReader::set_filter_sample_id(std::vector<std::string>& samp_ids, bool 
 
     for(uint32_t i=0; i < samps.size(); ++i) {
         if ( exclude ) {
-            if ( idxset.find(i) == idxset.end() ) {
+            if ( idxset.find(i+1) == idxset.end() ) {
                 samp_idx.push_back(i+1);
             }
         }
         else {
-            if ( idxset.find(i) != idxset.end() ) {
+            if ( idxset.find(i+1) != idxset.end() ) {
                 samp_idx.push_back(i+1);
             }
         }
@@ -475,9 +477,10 @@ bool PgenIdxReader::load_psam(const char* _psamf) {
         // add the sample to the list
         samps.push_back(samp);
         std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
+        ++nsamps;
         samp2idx[iid] = nsamps;
         //error("%s %s %s %d %d", iid.c_str(), samp.famID.c_str(), samp.indID.c_str(), idx_fid, idx_sex);
-        ++nsamps;
+        //++nsamps;
     }
 
     // fill in the sample indices to load
@@ -488,33 +491,44 @@ bool PgenIdxReader::load_psam(const char* _psamf) {
     return nsamps > 0;
 }
 
-void PgenIdxReader::set_filter_sample_id(std::vector<std::string>& samp_ids, bool exclude) {
-    samp_idx.clear();
-
-    std::set<uint32_t> idxset;
-    for(int32_t i=0; i < samp_ids.size(); ++i) {
-        std::map<std::string, uint32_t>::iterator it = samp2idx.find(samp_ids[i]);
-        if ( it != samp2idx.end() ) {
-            idxset.insert(it->second);
+void PgenIdxReader::subset_sample_indices(const std::vector<int32_t>& samp_indices, bool exclude) {
+    if ( exclude ) {
+        samp_idx.clear();
+        std::set<uint32_t> idxset;
+        for(int32_t i=0; i < samp_indices.size(); ++i) {
+            idxset.insert(samp_indices[i]-1); // convert to 0-based index
+        }
+        for(int32_t i=0; i < samps.size(); ++i) {
+            if ( idxset.find(i) == idxset.end() ) { // if not in the exclude set
+                samp_idx.push_back(i+1); // convert to 1-based index
+            }
         }
     }
+    else {
+        samp_idx = samp_indices; // copy the indices
+    }
+    if ( samp_idx.empty() ) {
+        notice("Warning - subset_sample_indices(): No samples to be included after subsetting");
+    }
+}
 
-    for(uint32_t i=0; i < samps.size(); ++i) {
-        if ( exclude ) {
-            if ( idxset.find(i) == idxset.end() ) {
-                samp_idx.push_back(i+1);
-            }
+
+void PgenIdxReader::subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude) {
+    std::vector<int32_t> idx;
+    int32_t n_miss = 0;
+    for(int32_t i=0; i < samp_ids.size(); ++i) {
+        std::map<std::string, int32_t>::iterator it = samp2idx.find(samp_ids[i]);
+        if ( it != samp2idx.end() ) {
+            idx.push_back(it->second); // convert to 1-based index
         }
         else {
-            if ( idxset.find(i) != idxset.end() ) {
-                samp_idx.push_back(i+1);
-            }
+            ++n_miss;
         }
+    }        
+    if ( n_miss > 0 ) {
+        notice("Warning - subset_sample_ids(): %d samples are not found in the sample file %s", n_miss, psamf.c_str());
     }
-
-    if ( samp_idx.empty() ) {
-        error("No samples to be included after subsetting to %zu", samp_ids.size());
-    }
+    subset_sample_indices(idx, exclude);
 }
 
 bool PgenIdxReader::read_pivar(const char* cpra) {
@@ -555,7 +569,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
                 cur_var.vid.assign(tr_pivar.str_field_at(2));
                 cur_var.ref.assign(ref);
                 split(cur_var.alts, ",", alts);
-                cur_var_idx = tr_pivar.int_field_at(8)-1; 
+                cur_var_idx = tr_pivar.int_field_at(icol_pivar_idx)-1; 
                 return true;
             }
             else if ( cpra_obj.chrom.compare(chrom) != 0 || pos > cpra_obj.pos ) {
@@ -582,7 +596,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             cur_var.vid.assign(tr_pivar.str_field_at(2));
             cur_var.ref.assign(ref);
             split(cur_var.alts, ",", alts);
-            cur_var_idx = tr_pivar.int_field_at(8)-1; 
+            cur_var_idx = tr_pivar.int_field_at(icol_pivar_idx)-1; 
             return true;
         }
     }

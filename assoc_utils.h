@@ -13,11 +13,18 @@ struct _slr_sumstat_t {
     double se;
     double tstat;
     double log10p;
+    int32_t n_obs;
 };
 
 typedef struct _slr_sumstat_t slr_sumstat_t;
 
 double tstat2log10pval(double tstat, double df);
-bool simple_linear_regression(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results);
+bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results);
+
+bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
+                                            const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
+                                            const Eigen::MatrixXd& X,
+                                            const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
+                                            std::vector<slr_sumstat_t>& results);
 
 #endif // __ASSOC_UTILS_H

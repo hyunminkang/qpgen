@@ -106,7 +106,7 @@ typedef struct _plink_samp_t plink_samp_t;
 
 // PLINK 2.0 reader with indexed pvar
 class PgenIdxReader {
-public:
+protected:
     PgenReader pgr;
     int32_t nthreads;
     tsv_reader tr_pivar; // read tabixed/indexed pvar file
@@ -117,10 +117,10 @@ public:
     std::string psamf;
     std::string pivarf;
 
-    // internal variables
+    // internal variables, should not be modified after calling get_genos()
     std::vector<plink_samp_t> samps;           // sample IDs -- fully loaded in memory 
-    std::map<std::string, uint32_t> samp2idx;  // sample ID maps
-    std::vector<int32_t> samp_idx;             // sample indices to load 
+    std::map<std::string, int32_t> samp2idx;  // sample ID maps 1-based index
+    std::vector<int32_t> samp_idx;             // sample indices to subset and load - 1-based index
 
     int jump_thres_bp;
 
@@ -128,19 +128,43 @@ public:
     bool pgen_loaded;
     plink_var_t cur_var;  // current variant information
     int32_t cur_var_idx;  // current variant index
+    int32_t icol_pivar_idx; // column index for the variant ID in the pvar file (0-based)
 
-    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), jump_thres_bp(10000) {}
+public:
+    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000) {}
 
     // functions to load ALL sample and FIRST variant info
     bool prep_pgen(const char* _pgenf, const char* _pivarf, const char* _psamf);
 
     // functions to set filters for samples and variants - should run after prep
-    void set_filter_sample_id(std::vector<std::string>& samp_ids, bool exclude = false);
+    //void set_filter_sample_id(std::vector<std::string>& samp_ids, bool exclude = false);
+    void subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude = false);
+    void subset_sample_indices(const std::vector<int32_t>& samp_indices, bool exclude = false);
 
     bool read_pivar(const char* cpra = NULL); // change the current variant position to a specific CPRA
     bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position
-
     bool load_psam(const char* _psamf);
+    
+    int32_t get_n_threads() const { return nthreads; }
+    void set_n_threads(int32_t n) { nthreads = n; }
+
+    int32_t get_jump_thres_bp() const { return jump_thres_bp; }
+    void set_jump_thres_bp(int32_t thres) { jump_thres_bp = thres; }
+
+    int32_t get_icol_pivar_idx() const { return icol_pivar_idx; }
+    void set_icol_pivar_idx(int32_t idx) { icol_pivar_idx = idx; }
+
+    const std::vector<int32_t>& get_int_buf() const { return int_buf; }
+    const double* get_dbl_buf() const { return dbl_buf; }
+    const std::map<std::string, int32_t>& get_samp2idx() { return samp2idx; }
+
+    bool is_pivar_loaded() const { return pivar_loaded; }
+    bool is_pgen_loaded() const { return pgen_loaded; }
+    const plink_var_t& get_current_variant() const { return cur_var; }
+    int32_t get_current_variant_idx() const { return cur_var_idx; }
+
+    int32_t get_sample_count() const { return (int32_t)samps.size(); }
+    const std::vector<plink_samp_t>& get_samples() const { return samps; }
 };
 
 class PlinkReader {
@@ -165,7 +189,7 @@ public:
 
     // internal variables
     std::vector<plink_samp_t> samps;             // sample IDs -- fully loaded in memory 
-    std::map<std::string, uint32_t> samp2idx;    // sample ID maps
+    std::map<std::string, int32_t> samp2idx;    // sample ID maps
     std::vector<int32_t> samp_idx;              // sample indices to load 
 
     uint32_t nvars;                     // variant index offset (if removed from memory)

@@ -195,7 +195,7 @@ double tstat2log10pval(double tstat, double df) {
  * @param X An Eigen::MatrixXd of size n x p (independent variables).
  * @return A std::vector of RegressionResult structs, one for each column of X.
  */
-bool simple_linear_regression(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results) {
+bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results) {
     int n = y.size();
     int p = X.cols();
 
@@ -245,9 +245,92 @@ bool simple_linear_regression(const Eigen::VectorXd& y, const Eigen::MatrixXd& X
         ss.se = std_errors[i];
         ss.tstat = t_values[i];
         ss.log10p = tstat2log10pval(ss.tstat, df);
+        ss.n_obs = n; // Store the number of observations
     }
 
     //error("stop");
+
+    return true;
+}
+
+bool simple_linear_regression_with_missing(const Eigen::VectorXd& y,
+                                            const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
+                                            const Eigen::MatrixXd& X,
+                                            const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
+                                            std::vector<slr_sumstat_t>& results) {
+    const int n_total = y.size();
+    const int p = X.cols();
+
+    // --- Input Validation ---
+    if (n_total != X.rows() || n_total != y_mask.size() ||
+        X.rows() != X_mask.rows() || X.cols() != X_mask.cols()) {
+        error("Data and mask dimensions do not match.");
+        return false;
+    }
+
+    results.clear();
+    results.resize(p);
+
+    // --- Main loop to iterate over each column of X ---
+    for (int i = 0; i < p; ++i) {
+        std::vector<double> y_complete;
+        std::vector<double> x_complete;
+        y_complete.reserve(n_total);
+        x_complete.reserve(n_total);
+
+        // 1. Pairwise deletion: Collect all pairs where mask is true
+        for (int j = 0; j < n_total; ++j) {
+            // THE CORE CHANGE IS HERE: Check the boolean mask instead of isnan()
+            if (y_mask(j) && X_mask(j, i)) {
+                y_complete.push_back(y(j));
+                x_complete.push_back(X(j, i));
+            }
+        }
+
+        const int n_complete = y_complete.size();
+        slr_sumstat_t& ss = results[i];
+        ss.n_obs = n_complete;
+
+        // 2. Check for sufficient data to perform regression
+        const int df = n_complete - 2;
+        if (df <= 0) {
+            ss.beta = std::numeric_limits<double>::quiet_NaN();
+            ss.se = std::numeric_limits<double>::quiet_NaN();
+            ss.tstat = std::numeric_limits<double>::quiet_NaN();
+            ss.log10p = std::numeric_limits<double>::quiet_NaN();
+            continue;
+        }
+
+        // 3. Map the std::vectors to Eigen vectors for calculation (no copy)
+        Eigen::Map<Eigen::VectorXd> y_vec(y_complete.data(), n_complete);
+        Eigen::Map<Eigen::VectorXd> x_vec(x_complete.data(), n_complete);
+
+        // 4. Perform regression calculations on the complete data
+        const double x_sq_norm = x_vec.squaredNorm();
+        const double y_sq_norm = y_vec.squaredNorm();
+        const double xt_y = x_vec.dot(y_vec);
+
+        if (x_sq_norm == 0) {
+            ss.beta = std::numeric_limits<double>::quiet_NaN();
+            ss.se = std::numeric_limits<double>::quiet_NaN();
+            ss.tstat = std::numeric_limits<double>::quiet_NaN();
+            ss.log10p = std::numeric_limits<double>::quiet_NaN();
+            continue;
+        }
+        
+        ss.beta = xt_y / x_sq_norm;
+        
+        const double sse = y_sq_norm - (xt_y * xt_y) / x_sq_norm;
+        ss.se = std::sqrt((sse / df) / x_sq_norm);
+        
+        if (ss.se > 0) {
+            ss.tstat = ss.beta / ss.se;
+            ss.log10p = tstat2log10pval(ss.tstat, df);
+        } else {
+            ss.tstat = std::numeric_limits<double>::quiet_NaN();
+            ss.log10p = std::numeric_limits<double>::quiet_NaN();
+        }
+    }
 
     return true;
 }
