@@ -375,8 +375,8 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
         }
         else {
             if ( icol_pair_variant >= 0 ) {
-                const char* var_id = tr_pair.str_field_at(0);
-                const char* phe_id = tr_pair.str_field_at(1);
+                const char* var_id = tr_pair.str_field_at(icol_pair_variant);
+                const char* phe_id = tr_pair.str_field_at(icol_pair_trait);
                 phe_trait2idx_it = phe_trait2idx.find(phe_id);
                 if ( phe_trait2idx_it == phe_trait2idx.end() ) {
                     notice("Skipping phenotype %s, which is not observed in %s", phe_id, phef.c_str());
