@@ -2,6 +2,9 @@
 #define __ASSOC_UTILS_H
 
 #include "Eigen/Dense"
+#include "qgenlib/qgen_error.h"
+#include "qgenlib/hts_utils.h"
+#include "qpgen.h"
 
 Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
 
@@ -26,5 +29,29 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::MatrixXd& X,
                                             const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
                                             std::vector<slr_sumstat_t>& results);
+
+Eigen::VectorXd rint_with_missing(
+    const Eigen::VectorXd& values,
+    const Eigen::Vector<bool, Eigen::Dynamic>& mask);
+
+Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values);
+
+int32_t assoc_single_trait( 
+    htsFile* wf, // output file handle
+    const char* pheno_id, // phenotype ID
+    const Eigen::VectorXd& phe_vec,      // phenotype vector
+    const Eigen::VectorXd& phe_rint_vec, // rinted phenotype vector 
+    const Eigen::Vector<bool, Eigen::Dynamic>& phe_mask_vec, // phenotype mask vector
+    bool phe_has_missing, // if the phenotype has missing values
+    bool skip_rint, // if the rank-based inverse normal transformation should be skipped
+    const Eigen::MatrixXd& geno_mat,    // genotype matrix
+    const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask,   // genotype mask matrix
+    bool geno_has_missing, // if the genotype has missing values
+    const std::vector<cpra_t>& v_cpra,      // variant pairs
+    const std::vector<int32_t>& ans,         // allele counts
+    const std::vector<double>& acs,         // allele counts
+    const std::vector<double>& infos       // infor values
+);
+
 
 #endif // __ASSOC_UTILS_H

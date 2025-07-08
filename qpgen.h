@@ -20,6 +20,21 @@ struct _plink_var_t {
     std::vector<std::string> alts;
     double cM;     // centimorgan
 
+    std::string to_string(char delim = ':') const {
+        std::string s;
+        s.append(schrom);
+        s.push_back(delim);
+        s.append(std::to_string(pos));
+        s.push_back(delim);
+        s.append(ref);
+        s.push_back(delim);
+        for(int32_t i = 0; i < (int32_t)alts.size(); ++i) {
+            if ( i > 0 ) s.push_back(',');
+            s.append(alts[i]);
+        }
+        return s;
+    }
+
     // additional information that can be filled with genotype data
     uint32_t an;    // number of non-missing alleles
     uint32_t ns;    // number of non-missing genotypes
@@ -28,6 +43,62 @@ struct _plink_var_t {
     std::vector<double> afs;
 };
 typedef struct _plink_var_t plink_var_t;
+
+struct _cbe_t {
+    std::string chrom;
+    int32_t beg1;
+    int32_t end0; // 1-based inclusive start and 0-based exclusive end
+
+    bool operator<(const struct _cbe_t& other) const {
+        if ( chrom < other.chrom ) return true;
+        if ( chrom > other.chrom ) return false;
+        if ( beg1 < other.beg1 ) return true;
+        if ( beg1 > other.beg1 ) return false;
+        return end0 < other.end0; 
+    }
+
+    std::string to_string(char delim1 = ':', char delim2 = '-') const {
+        std::string s;
+        s.append(chrom);
+        s.push_back(delim1);
+        s.append(std::to_string(beg1));
+        s.push_back(delim2);
+        s.append(std::to_string(end0));
+        return s;
+    }
+
+    _cbe_t(const char* _chrom, int32_t _beg1, int32_t _end0) 
+        : chrom(_chrom), beg1(_beg1), end0(_end0) {
+        if ( _beg1 < 1 || _end0 < 0 || _end0 <= _beg1 ) {
+            error("Invalid CBE format: %s:%d-%d", _chrom, _beg1, _end0);
+        }
+    }
+
+    _cbe_t(const char* s) {
+        const char delim1 = ':';
+        const char delim2 = '-';
+        const char* p = strchr(s, delim1);
+        if ( p == NULL ) {
+            error("Invalid CBE format: %s", s);
+        }
+        chrom.assign(s, p - s);
+        s = p + 1;
+        p = strchr(s, delim2);
+        if ( p == NULL ) {
+            error("Invalid CBE format: %s", s);
+        }
+        beg1 = atoi(s);
+        s = p + 1;
+        if ( *s == '\0' ) {
+            error("Invalid CBE format: %s", s);
+        }
+        else {
+            end0 = atoi(s); // 0-based exclusive end
+        }
+    }
+};
+
+typedef struct _cbe_t cbe_t;
 
 struct _cpra_t {
     std::string chrom;
@@ -145,6 +216,7 @@ public:
     void subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude = false);
     void subset_sample_indices(const std::vector<int32_t>& samp_indices, bool exclude = false);
 
+    bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL); // change the current variant position to a specific CPRA
     bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position
     bool load_psam(const char* _psamf);

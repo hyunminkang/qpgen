@@ -531,6 +531,42 @@ void PgenIdxReader::subset_sample_ids(const std::vector<std::string>& samp_ids, 
     subset_sample_indices(idx, exclude);
 }
 
+bool PgenIdxReader::read_pos(const char* chrom, int32_t pos) {
+    // load the variant file if not loaded
+    if ( !pivar_loaded ) {
+        if ( !tr_pivar.open(pivarf.c_str()) ) { // return false if file cannot be opened
+            error("Cannot open %s", pivarf.c_str());
+            return false;
+        } 
+        pivar_loaded = true;
+    }
+
+    tr_pivar.jump_to(chrom, pos);
+    while( tr_pivar.read_line() ) { // find the variant
+        if ( tr_pivar.nfields < icol_pivar_idx ) {
+            error("Invalid pvar file format at %s", pivarf.c_str());
+            return false;
+        }
+        const char* chrom2 = tr_pivar.str_field_at(0);
+        int32_t pos2 = tr_pivar.int_field_at(1);
+        if ( strcmp(chrom2, chrom) != 0 ) { // something is wrong. No variant found 
+            return false;           
+        }
+        if ( pos2 < pos ) {
+            continue;
+        }
+        // found the variant
+        cur_var.schrom.assign(chrom2);
+        cur_var.pos = pos2;
+        cur_var.vid.assign(tr_pivar.str_field_at(2));
+        cur_var.ref.assign(tr_pivar.str_field_at(3));
+        split(cur_var.alts, ",", tr_pivar.str_field_at(4));
+        cur_var_idx = tr_pivar.int_field_at(icol_pivar_idx)-1; 
+        return true;
+    }
+    return false;
+}
+
 bool PgenIdxReader::read_pivar(const char* cpra) {
     // load the variant file if not loaded
     if ( !pivar_loaded ) {

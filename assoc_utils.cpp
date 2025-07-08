@@ -253,7 +253,7 @@ bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Ei
     return true;
 }
 
-bool simple_linear_regression_with_missing(const Eigen::VectorXd& y,
+bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
                                             const Eigen::MatrixXd& X,
                                             const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
@@ -333,4 +333,238 @@ bool simple_linear_regression_with_missing(const Eigen::VectorXd& y,
     }
 
     return true;
+}
+
+double inverseNormalCDF(double p) {
+    if (p <= 0.0 || p >= 1.0) {
+        // Return infinity or NaN for out-of-range probabilities
+        if (p == 0.0) return -std::numeric_limits<double>::infinity();
+        if (p == 1.0) return std::numeric_limits<double>::infinity();
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    // Constants for the rational approximation
+    const double c0 = 2.515517;
+    const double c1 = 0.802853;
+    const double c2 = 0.010328;
+    const double d1 = 1.432788;
+    const double d2 = 0.189269;
+    const double d3 = 0.001308;
+
+    double t;
+    // The approximation is for the upper tail, so we mirror for p < 0.5
+    if (p < 0.5) {
+        t = std::sqrt(-2.0 * std::log(p));
+        double numerator = c0 + c1 * t + c2 * t * t;
+        double denominator = 1.0 + d1 * t + d2 * t * t + d3 * t * t * t;
+        return -(t - numerator / denominator);
+    } else {
+        t = std::sqrt(-2.0 * std::log(1.0 - p));
+        double numerator = c0 + c1 * t + c2 * t * t;
+        double denominator = 1.0 + d1 * t + d2 * t * t + d3 * t * t * t;
+        return t - numerator / denominator;
+    }
+}
+
+// Struct to hold value and its original index for sorting purposes
+struct ValueIndex {
+    double value;
+    int32_t original_index;
+};
+
+
+/**
+ * @brief Performs rank-based inverse normal transformation (unmasked version).
+ *
+ * This function assumes all values are valid and non-missing. It is more
+ * efficient than the masked version as it avoids the filtering step.
+ *
+ * @param values An Eigen::VectorXd containing the numerical data.
+ * @return An Eigen::VectorXd of the same size with the transformed values.
+ */
+Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values) {
+    int32_t n = values.size();
+    if (n == 0) {
+        return Eigen::VectorXd();
+    }
+
+    // --- 1. Indexing ---
+    // Create a vector of structs to hold value and original index.
+    std::vector<ValueIndex> indexed_values(n);
+    for (int32_t i = 0; i < n; ++i) {
+        indexed_values[i] = {values(i), i};
+    }
+
+    // --- 2. Sorting ---
+    std::sort(indexed_values.begin(), indexed_values.end(),
+                     [](const ValueIndex& a, const ValueIndex& b) {
+                         return a.value < b.value;
+                     });
+
+    // --- 3. Ranking with Tie Handling (Average Rank) ---
+    std::vector<double> ranks(n);
+    for (int32_t i = 0; i < n; ) {
+        int32_t j = i;
+        while (j < n && indexed_values[j].value == indexed_values[i].value) {
+            j++;
+        }
+        double sum_of_ranks = (double)(j - i) / 2.0 * ((i + 1) + j);
+        double average_rank = sum_of_ranks / (j - i);
+        for (int k = i; k < j; ++k) {
+            ranks[k] = average_rank;
+        }
+        i = j;
+    }
+
+    // for(int32_t i=0; i < 5; ++i) {
+    //     notice("%.5g\t%.5g\t%d\t%.5g", values(i), indexed_values[i].value, indexed_values[i].original_index, ranks[i]);
+    // }
+
+
+    // --- 4. Inverse Normal Transformation ---
+    Eigen::VectorXd result(n);
+    double n_plus_1 = static_cast<double>(n + 1);
+
+    for (int i = 0; i < n; ++i) {
+        double fractional_rank = ranks[i] / n_plus_1;
+        double transformed_value = inverseNormalCDF(fractional_rank);
+        result(indexed_values[i].original_index) = transformed_value;
+    }
+
+    // for(int32_t i=0; i < 5; ++i) {
+    //     notice("%.5g -> %.5g", values(i), result(i));
+    // }
+
+    return result;
+}
+
+
+/**
+ * @brief Performs rank-based inverse normal transformation on a numeric vector (masked version).
+ *
+ * This function takes a vector of values and a boolean mask. It ranks the
+ * non-masked values, handles ties by assigning the average rank, and then
+ * applies the inverse normal transformation to these ranks.
+ *
+ * @param values An Eigen::VectorXd containing the numerical data.
+ * @param mask An Eigen::Vector<bool, Eigen::Dynamic> of the same size as `values`.
+ * `true` indicates a value to be included in the transformation,
+ * `false` indicates a missing value to be ignored.
+ * @return An Eigen::VectorXd of the same size as the input. Transformed values
+ * are placed in their original positions. Positions corresponding to
+ * `false` in the mask are set to NaN.
+ */
+Eigen::VectorXd rint_with_missing(
+    const Eigen::VectorXd& values,
+    const Eigen::Vector<bool, Eigen::Dynamic>& mask) {
+
+    // --- 1. Pre-computation and Filtering ---
+    if (values.size() != mask.size()) {
+        throw std::invalid_argument("Input 'values' and 'mask' vectors must have the same size.");
+    }
+
+    std::vector<ValueIndex> filtered_values;
+    filtered_values.reserve(values.size()); // Reserve capacity
+    for (int32_t i = 0; i < values.size(); ++i) {
+        if (mask(i)) {
+            filtered_values.push_back({values(i), i});
+        }
+    }
+    
+    int32_t n_unmasked = filtered_values.size();
+    if (n_unmasked == 0) {
+        return Eigen::VectorXd::Constant(values.size(), NAN);
+    }
+
+    // --- 2. Sorting ---
+    std::sort(filtered_values.begin(), filtered_values.end(),
+                     [](const ValueIndex& a, const ValueIndex& b) {
+                         return a.value < b.value;
+                     });
+
+    // --- 3. Ranking with Tie Handling (Average Rank) ---
+    std::vector<double> ranks(n_unmasked);
+    for (int32_t i = 0; i < n_unmasked; ) {
+        int32_t j = i;
+        while (j < n_unmasked && filtered_values[j].value == filtered_values[i].value) {
+            j++;
+        }
+        double sum_of_ranks = (double)(j - i) / 2.0 * ((i + 1) + j);
+        double average_rank = sum_of_ranks / (j - i);
+        for (int k = i; k < j; ++k) {
+            ranks[k] = average_rank;
+        }
+        i = j;
+    }
+
+    // --- 4. Inverse Normal Transformation ---
+    Eigen::VectorXd result = Eigen::VectorXd::Constant(values.size(), NAN);
+    double n_plus_1 = static_cast<double>(n_unmasked + 1);
+
+    for (int i = 0; i < n_unmasked; ++i) {
+        double fractional_rank = ranks[i] / n_plus_1;
+        double transformed_value = inverseNormalCDF(fractional_rank);
+        result(filtered_values[i].original_index) = transformed_value;
+    }
+
+    return result;
+}
+
+int32_t assoc_single_trait ( 
+    htsFile* wf, // output file handle
+    const char* pheno_id, // phenotype ID
+    const Eigen::VectorXd& phe_vec,      // phenotype vector
+    const Eigen::VectorXd& phe_rint_vec, // rinted phenotype vector 
+    const Eigen::Vector<bool, Eigen::Dynamic>& phe_mask_vec, // phenotype mask vector
+    bool phe_has_missing, // if the phenotype has missing values
+    bool skip_rint, // if the rank-based inverse normal transformation should be skipped
+    const Eigen::MatrixXd& geno_mat,    // genotype matrix
+    const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask,   // genotype mask matrix
+    bool geno_has_missing, // if the genotype has missing values
+    const std::vector<cpra_t>& v_cpra,      // variant pairs
+    const std::vector<int32_t>& ans,         // allele counts
+    const std::vector<double>& acs,         // allele counts
+    const std::vector<double>& infos       // infor values
+) 
+{
+    std::vector<slr_sumstat_t> sumstats;
+    std::vector<slr_sumstat_t> sumstats_rint;
+    if ( !geno_has_missing && !phe_has_missing ) {
+        simple_linear_regression_without_missing(phe_vec, geno_mat, sumstats);
+        if ( ! skip_rint ) {
+            simple_linear_regression_without_missing(phe_rint_vec, geno_mat, sumstats_rint);
+        }
+    }
+    else {
+        simple_linear_regression_with_missing(phe_vec, phe_mask_vec, geno_mat, geno_mask, sumstats);
+        if ( ! skip_rint ) {
+            simple_linear_regression_with_missing(phe_rint_vec, phe_mask_vec, geno_mat, geno_mask, sumstats_rint);
+        }
+    }
+
+    // print the results
+    for(int32_t i=0; i < (int32_t)v_cpra.size(); ++i) {
+        const slr_sumstat_t& ss = sumstats[i];
+        hprintf(wf, "%s\t%s\t%d\t%s\t%s\t%s\t%.5g\t%.5g\t%d\t%.6g\t%.6g\t%.6g\t%.6g",
+            pheno_id, // TRAIT
+            v_cpra[i].chrom.c_str(), // CHROM
+            v_cpra[i].pos,           // POS
+            v_cpra[i].to_string().c_str(), // ID
+            v_cpra[i].ref.c_str(),  // REF
+            v_cpra[i].alts.c_str(), // ALT
+            (double)acs[i] / (double)ans[i], // AF
+            infos[i],  // INFO - placeholder, not calculated
+            ss.n_obs, // N - number of samples
+            ss.beta, // BETA
+            ss.se,   // SE
+            ss.tstat, // TSTAT
+            ss.log10p); // LOG10P
+        if ( ! skip_rint ) {
+            const slr_sumstat_t& ss_rint = sumstats_rint[i];
+            hprintf(wf, "\t%.6g\t%.6g\t%.6g\t%.6g", // BETA_RINT, SE_RINT, TSTAT_RINT, LOG10P_RINT
+                ss_rint.beta, ss_rint.se, ss_rint.tstat, ss_rint.log10p);
+        }
+        hprintf(wf, "\n");
+    }
+    return (int32_t)v_cpra.size(); // return the number of variants processed
 }
