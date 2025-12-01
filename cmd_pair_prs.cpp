@@ -347,7 +347,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
         // write down the SE matrix
         for(int32_t i=0; i < n_geno_samples; ++i) {
             const plink_samp_t& samp = mpr.get_loaded_sample(i);
-            hprintf(wf, "%s\t%s", samp.famID.emptu() ? samp.indID.c_str() : samp.famID.c_str(), samp.indID.c_str());
+            hprintf(wf, "%s\t%s", samp.famID.empty() ? samp.indID.c_str() : samp.famID.c_str(), samp.indID.c_str());
             for(int32_t j=0; j < trait_ids.size(); ++j) {
                 if ( count_mat(i, j) > 0 ) {
                     hprintf(wf, "\t%.5g", sqrt(var_mat(i, j)));
