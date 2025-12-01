@@ -824,7 +824,8 @@ bool MultiPgenIdxReader::get_genos() {                               // read the
                 dbl_buf = (double*)p_readers[idx_cur_reader]->get_dbl_buf();
             }
             else {
-                std::copy(p_readers[idx_cur_reader]->get_int_buf().begin(), p_readers[idx_cur_reader]->get_int_buf().end(), int_buf.begin());
+                //std::copy(p_readers[idx_cur_reader]->get_int_buf().begin(), p_readers[idx_cur_reader]->get_int_buf().end(), int_buf.begin());
+                int_buf = p_readers[idx_cur_reader]->get_int_buf();
             }
         }
         return ret;   
