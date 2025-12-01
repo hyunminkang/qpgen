@@ -211,7 +211,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
             // }
         }
         else { // when sample list is not provided, we first need to identify overlapping sample IDs
-            const std::vector<plink_samp_t>& geno_samps = pr.get_samples();
+            const std::vector<plink_samp_t>& geno_samps = pr.get_all_samples();
             for(int32_t i = 0; i < (int32_t)geno_samps.size(); ++i) {
                 const std::string& id = geno_samps[i].indID;
                 if ( phe_id2idx.find(id) != phe_id2idx.end() ) { // exists in pheno
@@ -272,7 +272,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
             pr.subset_sample_indices(geno_idxs, false); 
         }
         else { // when sample list is not provided, we first need to identify overlapping sample IDs
-            const std::vector<plink_samp_t>& geno_samps = pr.get_samples();
+            const std::vector<plink_samp_t>& geno_samps = pr.get_all_samples();
             for(int32_t i = 0; i < (int32_t)geno_samps.size(); ++i) {
                 const std::string& id = geno_samps[i].indID;
                 if ( phe_id2idx.find(id) != phe_id2idx.end() ) { // exists in pheno
@@ -287,7 +287,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
 
     // notice("phe_idxs.size() = %zu, cov_idxs.size() = %zu, geno_idxs.size() = %zu", phe_idxs.size(), cov_idxs.size(), geno_idxs.size());
     // for(int32_t i = 0; i < phe_idxs.size(); ++i) {
-    //     const std::vector<plink_samp_t>& geno_samps = pr.get_samples();
+    //     const std::vector<plink_samp_t>& geno_samps = pr.get_all_samples();
     //     notice("%d\t%d\t%s\t%d\t%s\t%d\t%s", i, geno_idxs[i], geno_samps[geno_idxs[i]-1].indID.c_str(),
     //            phe_idxs[i], phe_sample_ids[phe_idxs[i]].c_str(),
     //            cov_idxs.empty() ? -1 : cov_idxs[i], cov_idxs.empty() ? "NA" : cov_sample_ids[cov_idxs[i]].c_str());

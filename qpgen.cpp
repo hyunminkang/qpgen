@@ -658,3 +658,216 @@ bool PgenIdxReader::get_genos(int32_t var_idx) {
     }
     return true;
 }
+
+bool MultiPgenIdxReader::prep_pgen_list(const char* listf, const char* pgen_suffix, const char* pivar_suffix, const char* psam_suffix) {
+    // read the pgen list file
+    tsv_reader tr(listf);
+    // add one pgen file at a time
+    // while ensuring that the sample ids are consistent
+    // return false if any error occurs
+    while ( tr.read_line() ) {
+        const char* chrom = tr.str_field_at(0);
+        int32_t beg = tr.int_field_at(1);
+        int32_t end = tr.int_field_at(2);
+        if ( tr.nfields == 4 ) { // assume that the PLINK prefix is given as input
+            std::string prefix = tr.str_field_at(3);
+            std::string pgenf = prefix + pgen_suffix;
+            std::string pvarf = prefix + pivar_suffix;
+            std::string psamf = prefix + psam_suffix;
+            add_pgen(chrom, beg, end, pgenf.c_str(), pvarf.c_str(), psamf.c_str());
+        }
+        else if ( tr.nfields == 6 ) {
+            std::string pgenf = tr.str_field_at(3);
+            std::string pvarf = tr.str_field_at(4);
+            std::string psamf = tr.str_field_at(5);
+            add_pgen(chrom, beg, end, pgenf.c_str(), pvarf.c_str(), psamf.c_str());
+        }
+        else {
+            error("Invalid pgen list file format at %s. Expecting 4 or 6 fields, got %zu", listf, tr.nfields);
+            return false;
+        }
+    }
+
+    // check if loci are overlapping
+    genomeLocus prev_locus("", 0, 0);
+    bool is_beginning = true;
+    for(locus2idx.rewind(); !locus2idx.isend(); locus2idx.next()) {
+        if ( !is_beginning ) {
+            // check if the neighboring locus are overlapping
+            if ( locus2idx.it->first.overlaps(prev_locus) ) {
+                error("Overlapping loci found: %s and %s. Please use PLINK files with non-overlapping regions", prev_locus.toString(), locus2idx.it->first.toString());
+                return false;
+            }
+        }
+        prev_locus = locus2idx.it->first;
+        is_beginning = false;
+    }
+    return true;
+}
+
+bool MultiPgenIdxReader::add_pgen(const char* chrom, int32_t beg, int32_t end, const char* pgenf, const char* pivarf, const char* psamf) {
+    // add one pgen file at a time
+    // make sure that the regions are non-overlapping
+    // make sure that the sample ids are consistent
+    // return false if any error occurs
+    PgenIdxReader* p_reader = new PgenIdxReader();
+    if ( ! p_reader->prep_pgen(pgenf, pivarf, psamf) ) {
+        error("Failed to prepare pgen/pivar/psam files %s/%s/%s", pgenf, pivarf, psamf);
+    }
+    int32_t idx = p_readers.size();
+    if ( idx > 0 ) {
+        // make sure that the sample sizes are consistent
+        if ( p_reader->get_loaded_sample_count() != p_readers[0]->get_loaded_sample_count() ) {
+            error("Sample sizes do not match between pgen files");
+            return false;
+        }
+
+        // make sure that the sample ids are consistent
+        int32_t n = p_reader->get_loaded_sample_count();
+        const std::vector<plink_samp_t>& samp_ids = p_reader->get_all_samples();
+        const std::vector<plink_samp_t>& samp_ids_0 = p_readers[0]->get_all_samples();
+        for(int32_t i=0; i < n; ++i) {
+            if ( samp_ids[i].indID != samp_ids_0[i].indID ) {
+                error("Sample ids do not match in PSAM file %s", psamf);
+                return false;
+            }
+        }
+    }
+    p_readers.push_back(p_reader);
+    loci.push_back(genomeLocus(chrom, beg, end));
+    locus2idx.add(chrom, beg, end, idx);
+
+    // how do I effciently ensure that the loci are non-overlapping?
+    return true;
+}
+
+bool MultiPgenIdxReader::set_single_chunk_pgen(const char* pgenf, const char* pivarf, const char* psamf) {
+    if ( p_readers.size() > 0 ) {
+        error("Single chunk pgen files cannot be set with multiple pgen files");
+        return false;
+    }
+    PgenIdxReader* p_reader = new PgenIdxReader();
+    if ( ! p_reader->prep_pgen(pgenf, pivarf, psamf) ) {
+        error("Failed to prepare pgen/pivar/psam files %s/%s/%s", pgenf, pivarf, psamf);
+    }
+    p_readers.push_back(p_reader);
+
+    single_chunk_mode = true;
+    idx_cur_reader = 0;
+    return true;
+}
+
+void MultiPgenIdxReader::subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude) {
+    for(int32_t i=0; i < p_readers.size(); ++i) {
+        p_readers[i]->subset_sample_ids(samp_ids, exclude);
+        if ( p_readers[i]->get_loaded_sample_count() != p_readers[0]->get_loaded_sample_count() ) {
+            error("Sample sizes do not match between pgen files after subsetting");
+        }
+    }   
+}
+
+bool MultiPgenIdxReader::read_pos(const char* chrom, int32_t pos) { // change the current variant position to a specific CPRA
+    // find the locus that contains the position
+    if ( single_chunk_mode ) {
+        return p_readers[0]->read_pos(chrom, pos);
+    }
+    else if ( locus2idx.moveTo(chrom, pos) ) {
+        // overlapping region exists
+        int32_t idx = locus2idx.it->second;
+        idx_cur_reader = idx;
+        return p_readers[idx]->read_pos(chrom, pos);
+    }
+    return false;
+}
+
+bool MultiPgenIdxReader::read_pivar(const char* cpra) {      // change the current variant position to a specific CPRA
+    if ( cpra == NULL ) {
+        if ( single_chunk_mode ) {
+            return p_readers[0]->read_pivar();
+        }
+        else if ( idx_cur_reader >= 0 ) {
+            bool ret = p_readers[idx_cur_reader]->read_pivar();
+            while ( !ret ) {
+                locus2idx.next();
+                if ( locus2idx.isend() ) {
+                    return false;
+                }
+                idx_cur_reader = locus2idx.it->second;
+                ret = p_readers[idx_cur_reader]->read_pivar();
+            }
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+    else {
+        if ( single_chunk_mode ) {
+            return p_readers[0]->read_pivar(cpra);
+        }
+        else {
+            cpra_t cpra_obj(cpra);
+            if ( locus2idx.moveTo(cpra_obj.chrom.c_str(), cpra_obj.pos) ) {
+                int32_t idx = locus2idx.it->second;
+                idx_cur_reader = idx;
+                return p_readers[idx]->read_pivar(cpra);
+            }
+            return false;
+        }
+    }
+}
+bool MultiPgenIdxReader::get_genos() {                               // read the genotypes at the current variant position
+    if ( idx_cur_reader >= 0 ) {
+        return p_readers[idx_cur_reader]->get_genos();
+    }
+    return false;
+}
+
+void MultiPgenIdxReader::set_n_threads(int32_t n) { 
+    nthreads = n; 
+    for(int32_t i=0; i < p_readers.size(); ++i) {
+        p_readers[i]->set_n_threads(n);
+    }
+}
+
+void MultiPgenIdxReader::set_icol_pivar_idx(int32_t idx) {
+    icol_pivar_idx = idx;
+    for(int32_t i=0; i < p_readers.size(); ++i) {
+        p_readers[i]->set_icol_pivar_idx(idx);
+    }
+}
+
+const plink_var_t& MultiPgenIdxReader::get_current_variant() const {
+    if ( idx_cur_reader < 0 ) {
+        error("No PGEN file is currently active");
+    }
+    return p_readers[idx_cur_reader]->get_current_variant();
+}
+
+int32_t MultiPgenIdxReader::get_all_sample_count() const {
+    if ( p_readers.size() == 0 ) {
+        error("No PGEN files are added yet");
+    }
+    return p_readers[0]->get_all_sample_count();
+}
+const std::vector<plink_samp_t>& MultiPgenIdxReader::get_all_samples() {
+    if ( p_readers.size() == 0 ) {
+        error("No PGEN files are added yet");
+    }
+    return p_readers[0]->get_all_samples();
+}
+
+int32_t MultiPgenIdxReader::get_loaded_sample_count() const {
+    if ( p_readers.size() == 0 ) {
+        error("No PGEN files are added yet");
+    }
+    return p_readers[0]->get_loaded_sample_count();
+}
+
+//const std::vector<int32_t>& MultiPgenIdxReader::get_loaded_sample_indices() const;
+const plink_samp_t& MultiPgenIdxReader::get_loaded_sample(int32_t idx) const {
+    if ( p_readers.size() == 0 ) {
+        error("No PGEN files are added yet");
+    }
+    return p_readers[0]->get_loaded_sample(idx);
+}

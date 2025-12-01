@@ -62,6 +62,7 @@ set(APP_FILES
     cmd_join_plp_geno.cpp
     cmd_geno2tsv.cpp
     cmd_pair_assoc.cpp
+    cmd_pair_prs.cpp
 )
 
 set(SOURCE_FILES

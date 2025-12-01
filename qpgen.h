@@ -4,6 +4,7 @@
 #include "qgenlib/qgen_error.h"
 #include "qgenlib/tsv_reader.h"
 #include "pgenlibr.h"
+#include "qgenlib/genome_loci.h"
 
 // A Reader for PLINK 1.9/2.0 .bed/.pgen file
 // with support for tabixed variant index
@@ -193,7 +194,7 @@ protected:
     std::map<std::string, int32_t> samp2idx;  // sample ID maps 1-based index
     std::vector<int32_t> samp_idx;             // sample indices to subset and load - 1-based index
 
-    int jump_thres_bp;
+    int32_t jump_thres_bp;
 
     bool pivar_loaded;
     bool pgen_loaded;
@@ -240,9 +241,73 @@ public:
     const plink_var_t& get_current_variant() const { return cur_var; }
     int32_t get_current_variant_idx() const { return cur_var_idx; }
 
-    int32_t get_sample_count() const { return (int32_t)samps.size(); }
-    const std::vector<plink_samp_t>& get_samples() const { return samps; }
+    int32_t get_all_sample_count() const { return (int32_t)samps.size(); }
+    const std::vector<plink_samp_t>& get_all_samples() const { return samps; }
+    int32_t get_loaded_sample_count() const { return (int32_t)samp_idx.size(); }
+    const std::vector<int32_t>& get_loaded_sample_indices() const { return samp_idx; }
+    const plink_samp_t& get_loaded_sample(int32_t idx) const { return samps[samp_idx[idx]-1]; }
 };
+
+class MultiPgenIdxReader {
+protected:
+    std::vector<PgenIdxReader*> p_readers; // list of pgen readers
+    std::vector<genomeLocus> loci;         // list of loci
+    genomeLocusMap<int32_t> locus2idx;     // locus to reader index
+    int32_t jump_thres_bp;
+    int32_t nthreads;
+    int32_t idx_cur_reader;  // current reader index
+    int32_t icol_pivar_idx;   // column index for the variant ID in the pvar file (0-based)
+    double* dbl_buf;
+    std::vector<int32_t> int_buf;
+    bool dosage_present; // true if dosage is present in the pgen file
+    bool single_chunk_mode;   // true if the loci are in a single chunk
+
+public:
+    MultiPgenIdxReader() : jump_thres_bp(10000), nthreads(1), idx_cur_reader(-1), icol_pivar_idx(8), dbl_buf(NULL), dosage_present(false), single_chunk_mode(false) {}
+    ~MultiPgenIdxReader() {
+        for (int32_t i=0; i < p_readers.size(); ++i) {
+            delete p_readers[i];
+        }
+        if ( dbl_buf ) free(dbl_buf);
+    }
+
+    bool prep_pgen_list(const char* listf, const char* pgen_suffix = ".pgen", const char* pivar_suffix = ".pvar.idx.gz", const char* psam_suffix = ".psam");
+    bool add_pgen(const char* chrom, int32_t beg, int32_t end, const char* pgenf, const char* pivarf, const char* psamf);
+    bool set_single_chunk_pgen(const char* pgenf, const char* pivarf, const char* psamf);
+
+    void subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude = false);
+
+    bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
+    bool read_pivar(const char* cpra = NULL);      // change the current variant position to a specific CPRA
+    bool get_genos();                              // read the genotypes at the current variant position
+    
+    int32_t get_n_threads() const { return nthreads; }
+    void set_n_threads(int32_t n);
+
+    int32_t get_icol_pivar_idx() const { return icol_pivar_idx; }
+    void set_icol_pivar_idx(int32_t idx);
+
+    const std::vector<int32_t>& get_int_buf() const { return int_buf; }
+    const double* get_dbl_buf() const { return dbl_buf; }
+
+    bool is_dosage_present() const { return dosage_present; }
+    const plink_var_t& get_current_variant() const;
+
+    int32_t get_all_sample_count() const;
+    const std::vector<plink_samp_t>& get_all_samples();
+    int32_t get_loaded_sample_count() const;
+    //const std::vector<int32_t>& get_loaded_sample_indices() const;
+    const plink_samp_t& get_loaded_sample(int32_t idx) const;
+
+    int32_t get_jump_thres_bp() const { return jump_thres_bp; }
+    void set_jump_thres_bp(int32_t thres) { 
+        jump_thres_bp = thres; 
+        for (int32_t i=0; i < p_readers.size(); ++i) {
+            p_readers[i]->set_jump_thres_bp(thres);
+        }
+    }
+};
+
 
 class PlinkReader {
 public:

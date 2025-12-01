@@ -7,6 +7,7 @@ int32_t match_plp_geno(int32_t argc, char** argv);
 int32_t join_plp_geno(int32_t argc, char** argv);
 int32_t cmd_geno2tsv(int32_t argc, char** argv);
 int32_t cmd_pair_assoc(int32_t argc, char** argv);
+int32_t cmd_pair_prs(int32_t argc, char** argv);
  
 int32_t main(int32_t argc, char** argv) {
   commandList cl;
@@ -14,6 +15,7 @@ int32_t main(int32_t argc, char** argv) {
   BEGIN_LONG_COMMANDS(longCommandlines)
     LONG_COMMAND_GROUP("Utilities for xqtls", NULL)
     LONG_COMMAND("pair-assoc", &cmd_pair_assoc, "Perform pairwise association analysis for specific pairs of phenotype variant pairs")
+    LONG_COMMAND("pair-prs", &cmd_pair_prs, "Perform pairwise PRS generation based on summary statistics")
 
     LONG_COMMAND_GROUP("Utilities for multi-omics", NULL)
     LONG_COMMAND("match-plp-geno", &match_plp_geno, "Check the concordance between pileup and genotypes")
