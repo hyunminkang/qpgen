@@ -179,7 +179,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     int32_t n_phe = trait_ids.size();
     uint64_t n_geno_missing = 0;
     // initialize the PRS matrix to 0
-    Eigen::MatrixXd prs_mat(n_geno_samples, n_phe   );
+    Eigen::MatrixXd prs_mat(n_geno_samples, n_phe);
     prs_mat.setZero();
     Eigen::MatrixXd var_mat(n_geno_samples, n_phe);
     var_mat.setZero();
@@ -196,8 +196,6 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
         cpra_t cpra = var2traits_it->first;
         const std::vector<int32_t>& phe_idxs = var2traits_it->second;
         // extract the genotypes
-        const std::vector<int32_t>& int_buf = mpr.get_int_buf();
-        const double* dbl_buf = mpr.get_dbl_buf();
         // notice("int_buf.size() = %zu", int_buf.size());
         std::string cpra_s(cpra.to_string());
         if ( !mpr.read_pivar(cpra_s.c_str()) ) {
@@ -209,6 +207,8 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
             notice("Skipping variant %s, which failed to read genotypes", cpra_s.c_str());
             continue;
         }
+        const std::vector<int32_t>& int_buf = mpr.get_int_buf();
+        const double* dbl_buf = mpr.get_dbl_buf();
         //notice("Finished reading genotypes for variant %s", cpra_s.c_str());
         int32_t an = 0;
         double ac = 0;

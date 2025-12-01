@@ -818,7 +818,16 @@ bool MultiPgenIdxReader::read_pivar(const char* cpra) {      // change the curre
 }
 bool MultiPgenIdxReader::get_genos() {                               // read the genotypes at the current variant position
     if ( idx_cur_reader >= 0 ) {
-        return p_readers[idx_cur_reader]->get_genos();
+        bool ret = p_readers[idx_cur_reader]->get_genos();
+        if ( ret ) {
+            if ( dosage_present ) {
+                dbl_buf = (double*)p_readers[idx_cur_reader]->get_dbl_buf();
+            }
+            else {
+                std::copy(p_readers[idx_cur_reader]->get_int_buf().begin(), p_readers[idx_cur_reader]->get_int_buf().end(), int_buf.begin());
+            }
+        }
+        return ret;   
     }
     return false;
 }
