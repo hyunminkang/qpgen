@@ -101,6 +101,24 @@ struct _cbe_t {
 
 typedef struct _cbe_t cbe_t;
 
+struct _var_cnt_t {
+    int32_t an;
+    double ac;
+    int32_t gcs[3]; // genotype counts for 0, 1, 2
+    _var_cnt_t() : an(0), ac(0.0) {
+        gcs[0] = 0;
+        gcs[1] = 0;
+        gcs[2] = 0;
+    }
+    _var_cnt_t(int32_t _an, double _ac, int32_t _gc0, int32_t _gc1, int32_t _gc2) 
+        : an(_an), ac(_ac) {
+        gcs[0] = _gc0;
+        gcs[1] = _gc1;
+        gcs[2] = _gc2;
+    }
+};
+typedef struct _var_cnt_t var_cnt_t;
+
 struct _cpra_t {
     std::string chrom;
     int32_t pos;
@@ -127,6 +145,13 @@ struct _cpra_t {
         s.push_back(delim);
         s.append(alts);
         return s;
+    }
+
+    _cpra_t(const char* _chrom, int32_t _pos, const char* _ref, const char* _alts) 
+        : chrom(_chrom), pos(_pos), ref(_ref), alts(_alts) {
+        if ( _pos < 0 ) {
+            error("Invalid CPRA format: %s:%d:%s:%s", _chrom, _pos, _ref, _alts);
+        }
     }
 
     _cpra_t(const char* s, char delim = ':') {

@@ -8,6 +8,8 @@
 
 Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
 
+Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
+
 void center_rows(Eigen::MatrixXd &matrix);
 
 // Structure to hold the results of the regression for one variable
@@ -30,11 +32,18 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
                                             std::vector<slr_sumstat_t>& results);
 
+bool simple_rect_regression_without_missing(
+    const Eigen::MatrixXd& Y,
+    const Eigen::MatrixXd& X,
+    std::vector<std::vector<slr_sumstat_t>>& results);
+
 Eigen::VectorXd rint_with_missing(
     const Eigen::VectorXd& values,
     const Eigen::Vector<bool, Eigen::Dynamic>& mask);
 
 Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values);
+
+Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix);
 
 int32_t assoc_single_trait( 
     htsFile* wf, // output file handle

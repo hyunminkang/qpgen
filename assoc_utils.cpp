@@ -39,6 +39,36 @@ Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const 
     return residuals_t.transpose();
 }
 
+Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates) {
+    const long n = values.rows();
+    const long g = values.cols();
+    const long p = covariates.cols();
+
+    // --- Input Validation ---
+    // Ensure the number of observations (rows) is the same in both matrices.
+    if (n != covariates.rows()) {
+        throw std::runtime_error("Value and covariate matrices must have the same number of rows (observations).");
+    }
+
+    // --- Augment Covariate Matrix with Intercept ---
+    // We create an augmented covariate matrix `C_aug` of size n x (p+1).
+    Eigen::MatrixXd C_aug(n, p + 1);
+    C_aug.col(0).setOnes(); // First column is the intercept (all ones).
+    C_aug.rightCols(p) = covariates; // The remaining columns are the covariates.
+
+    // --- Solve the Least Squares Problem ---
+    // We solve for the coefficient matrix `beta` ((p+1) x g) where `values = C_aug * beta`.
+    // Eigen's `colPivHouseholderQr()` provides a robust way to solve this.
+    // This is efficient as the decomposition of C_aug is computed once and reused for all columns of values.
+    Eigen::MatrixXd beta = C_aug.colPivHouseholderQr().solve(values);
+
+    // --- Calculate Residuals ---
+    // The predicted values are `C_aug * beta`.
+    // The residuals are the original values minus the predicted values.
+    // The resulting residual matrix is in n x g format.
+    return values - (C_aug * beta);
+}
+
 void center_rows(Eigen::MatrixXd &matrix) {
     // We iterate over each row of the matrix.
     // The .rowwise() method allows us to apply an operation to each row.
@@ -249,6 +279,78 @@ bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Ei
     }
 
     //error("stop");
+
+    return true;
+}
+
+bool simple_rect_regression_without_missing(
+    const Eigen::MatrixXd& Y,
+    const Eigen::MatrixXd& X,
+    std::vector<std::vector<slr_sumstat_t>>& results) {
+    const int n = Y.rows();
+    const int num_x = X.cols();
+    const int num_y = Y.cols();
+
+    if (n != X.rows()) {
+        error("Matrix dimensions do not match : Y is (%d x %d) while X is (%d x %d)", Y.rows(), Y.cols(), X.rows(), X.cols());
+    }
+
+    const int df = n - 2;
+    if (df <= 0) {
+        error("Not enough data points to perform regression (n-2 = %d must be > 0).", df);
+    }
+
+    results.clear();
+    results.resize(num_x);
+
+    if (num_x == 0 || num_y == 0) {
+        return true;
+    }
+
+    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
+    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
+    const Eigen::MatrixXd xt_y = X.transpose() * Y;
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double df_double = static_cast<double>(df);
+
+    for (int i = 0; i < num_x; ++i) {
+        auto& row_results = results[i];
+        row_results.resize(num_y);
+        const double x_norm = x_sq_norms(i);
+
+        if (x_norm <= 0.0) {
+            for (int j = 0; j < num_y; ++j) {
+                slr_sumstat_t& ss = row_results[j];
+                ss.beta = nan;
+                ss.se = nan;
+                ss.tstat = nan;
+                ss.log10p = nan;
+                ss.n_obs = n;
+            }
+            continue;
+        }
+
+        const Eigen::ArrayXXd xty_row = xt_y.row(i).array();
+        const Eigen::ArrayXXd betas = xty_row / x_norm;
+        const Eigen::ArrayXXd sse = (y_sq_norms.array() - (xty_row.square() / x_norm)).max(0.0);
+        const Eigen::ArrayXXd std_errors = ((sse / df_double) / x_norm).sqrt();
+
+        for (int j = 0; j < num_y; ++j) {
+            slr_sumstat_t& ss = row_results[j];
+            const double beta = betas(0, j);
+            const double se = std_errors(0, j);
+            const bool valid_se = std::isfinite(se) && se > 0.0;
+            const double tstat = valid_se ? beta / se : nan;
+            const double log10p = valid_se ? tstat2log10pval(tstat, df) : nan;
+
+            ss.beta = beta;
+            ss.se = se;
+            ss.tstat = tstat;
+            ss.log10p = log10p;
+            ss.n_obs = n;
+        }
+    }
 
     return true;
 }
@@ -510,7 +612,65 @@ Eigen::VectorXd rint_with_missing(
     return result;
 }
 
-int32_t assoc_single_trait ( 
+/**
+ * @brief Performs column-wise rank-based inverse normal transformation on a matrix (unmasked version).
+ *
+ * This function assumes all values are valid and non-missing. It performs RINT on each column independently.
+ *
+ * @param matrix An Eigen::MatrixXd containing the numerical data.
+ * @return An Eigen::MatrixXd of the same size with the transformed values.
+ */
+Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix) {
+    int32_t n_rows = matrix.rows();
+    int32_t n_cols = matrix.cols();
+    
+    if (n_rows == 0 || n_cols == 0) {
+        return Eigen::MatrixXd(n_rows, n_cols);
+    }
+
+    Eigen::MatrixXd result(n_rows, n_cols);
+    double n_plus_1 = static_cast<double>(n_rows + 1);
+    
+    // Reuse the vector for sorting to avoid repeated allocations
+    std::vector<ValueIndex> indexed_values(n_rows);
+
+    for (int32_t j = 0; j < n_cols; ++j) {
+        // 1. Indexing
+        for (int32_t i = 0; i < n_rows; ++i) {
+            indexed_values[i].value = matrix(i, j);
+            indexed_values[i].original_index = i;
+        }
+
+        // 2. Sorting
+        std::sort(indexed_values.begin(), indexed_values.end(),
+                     [](const ValueIndex& a, const ValueIndex& b) {
+                         return a.value < b.value;
+                     });
+
+        // 3. Ranking and Transformation
+        for (int32_t i = 0; i < n_rows; ) {
+            int32_t k = i + 1;
+            while (k < n_rows && indexed_values[k].value == indexed_values[i].value) {
+                k++;
+            }
+            
+            // Average rank calculation
+            // The ranks for the tied group are i+1, i+2, ..., k
+            // Average rank = ( (i+1) + k ) / 2.0
+            double average_rank = (i + 1 + k) / 2.0;
+            double fractional_rank = average_rank / n_plus_1;
+            double transformed_value = inverseNormalCDF(fractional_rank);
+            
+            for (int l = i; l < k; ++l) {
+                result(indexed_values[l].original_index, j) = transformed_value;
+            }
+            i = k;
+        }
+    }
+    return result;
+}
+
+int32_t assoc_single_trait( 
     htsFile* wf, // output file handle
     const char* pheno_id, // phenotype ID
     const Eigen::VectorXd& phe_vec,      // phenotype vector

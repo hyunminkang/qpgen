@@ -4,23 +4,10 @@
 #include "qgenlib/phred_helper.h"
 #include "qgenlib/hts_utils.h"
 #include "assoc_utils.h"
+#include "qpgen_utils.h"
 #include "qpgen.h"
 #include "Eigen/Dense"
 #include <cmath>
-
-void fill_list_indices(const std::vector<std::string>& list, const std::map<std::string, int32_t>& list2idx, std::vector<int32_t>& indices)
-{
-    indices.clear();
-    indices.resize(list.size(), -1);
-    for (size_t i = 0; i < list.size(); ++i)
-    {
-        auto it = list2idx.find(list[i]);
-        if (it == list2idx.end()) {
-            error("Sample ID %s not found in the list provided", list[i].c_str());
-        }
-        indices[i] = it->second;
-    }
-}
 
 int32_t cmd_pair_assoc(int32_t argc, char **argv)
 {

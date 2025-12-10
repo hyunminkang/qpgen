@@ -63,11 +63,16 @@ set(APP_FILES
     cmd_geno2tsv.cpp
     cmd_pair_assoc.cpp
     cmd_pair_prs.cpp
+    cmd_rect_assoc.cpp
 )
 
 set(SOURCE_FILES
     qpgen.cpp
     qpgen.h
+    pheno.cpp
+    pheno.h
+    qpgen_utils.cpp
+    qpgen_utils.h
     assoc_utils.h
     assoc_utils.cpp
     include/pgenlib_misc.cc

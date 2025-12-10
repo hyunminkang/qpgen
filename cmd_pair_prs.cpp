@@ -189,8 +189,11 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     geno_vec.setZero();
     Eigen::Vector<bool, Eigen::Dynamic> mask_vec(n_geno_samples);
     mask_vec.setZero();
+    Eigen::Vector<bool, Eigen::Dynamic> mask_any_present(n_phe);
+    mask_any_present.setZero();
     
     // iterate each variant 
+    int32_t n_pass = 0, n_skip = 0;
     std::map<cpra_t, std::vector<int32_t> >::iterator var2traits_it;
     for(var2traits_it = var2traits.begin(); var2traits_it != var2traits.end(); ++var2traits_it) {
         cpra_t cpra = var2traits_it->first;
@@ -200,11 +203,13 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
         std::string cpra_s(cpra.to_string());
         if ( !mpr.read_pivar(cpra_s.c_str()) ) {
             notice("Skipping variant %s which is not found in the pvar file", cpra_s.c_str());
+            ++n_skip;
             continue;
         }   
         //notice("Reading genotypes for variant %s", cpra_s.c_str());
         if ( !mpr.get_genos() ) {
             notice("Skipping variant %s, which failed to read genotypes", cpra_s.c_str());
+            ++n_skip;
             continue;
         }
         const std::vector<int32_t>& int_buf = mpr.get_int_buf();
@@ -290,6 +295,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
                 }
             }
         }
+        ++n_pass;
         // update each trait
         for(int32_t i=0; i < phe_idxs.size(); ++i) {
             int32_t phe_idx = phe_idxs[i];
@@ -301,7 +307,11 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
             var_mat.col(phe_idx).array() += (beta_se.second * geno_vec).array().square();
             // update the count
             count_mat.col(phe_idx) += mask_vec.cast<double>();
+            mask_any_present(phe_idx) = true;
         }        
+        if ( (n_pass + n_skip) % 100 == 0 ) {
+            notice("Processed %d variants, skipped %d variants out of %zu variants", n_pass, n_skip, var2traits.size());
+        }
     }
 
     std::string out_prs = outf + ".prs.tsv.gz";
@@ -312,7 +322,9 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     // write the predicted PRS matrix in the format of Regenie phenotype files
     hprintf(wf, "FID\tIID");
     for(int32_t i=0; i < trait_ids.size(); ++i) {
-        hprintf(wf, "\t%s", trait_ids[i].c_str());
+        if ( mask_any_present(i) ) {
+            hprintf(wf, "\t%s", trait_ids[i].c_str());
+        }
     }
     hprintf(wf, "\n");
     // write down the PRS matrix
@@ -323,14 +335,13 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
             if ( count_mat(i, j) > 0 ) {
                 hprintf(wf, "\t%.5g", prs_mat(i, j));
             }
-            else {
+            else if ( mask_any_present(j) ) {
                 hprintf(wf, "\tNA");
             }
         }
         hprintf(wf, "\n");
     }
     hts_close(wf); // close the output file
-    notice("Analysis finished");
 
     if ( icol_pair_se >= 0 ) {
         std::string out_se = outf + ".se.tsv.gz";
@@ -341,7 +352,9 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
         // write the predicted PRS matrix in the format of Regenie phenotype files
         hprintf(wf, "FID\tIID");
         for(int32_t i=0; i < trait_ids.size(); ++i) {
-            hprintf(wf, "\t%s", trait_ids[i].c_str());
+            if ( mask_any_present(i) ) {
+                hprintf(wf, "\t%s", trait_ids[i].c_str());
+            }
         }
         hprintf(wf, "\n");
         // write down the SE matrix
@@ -352,7 +365,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
                 if ( count_mat(i, j) > 0 ) {
                     hprintf(wf, "\t%.5g", sqrt(var_mat(i, j)));
                 }
-                else {
+                else if ( mask_any_present(j) ) {
                     hprintf(wf, "\tNA");
                 }
             }
