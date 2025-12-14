@@ -68,3 +68,20 @@ void fill_list_indices(const std::vector<std::string>& list, const std::map<std:
         indices[i] = it->second;
     }
 }
+
+int32_t rebuild_id2index_map(
+    const std::vector<std::string>& ids,
+    std::map<std::string, int32_t>& id2idx_map
+)
+{
+    id2idx_map.clear();
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+        const std::string& id = ids[i];
+        if (id2idx_map.find(id) != id2idx_map.end()) {
+            error("Duplicate ID %s found when rebuilding ID to index map", id.c_str());
+        }
+        id2idx_map[id] = i;
+    }
+    return (int32_t)id2idx_map.size();
+}

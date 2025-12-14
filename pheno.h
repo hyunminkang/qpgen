@@ -22,6 +22,8 @@ public:
     bool has_missing;
     bool has_loci;
     std::set<std::string> missing_strs; 
+    std::map<std::string, int32_t> pheno_id2idx;
+    std::map<std::string, int32_t> samp_id2idx;
 
     PhenoMatrix() : has_missing(false), has_loci(false) {}
     ~PhenoMatrix() {}
@@ -33,6 +35,10 @@ public:
     bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\0');
     int32_t subset_sample_ids(const std::vector<std::string>& samp_ids);
     int32_t subset_pheno_ids(const std::vector<std::string>& pheno_ids);
+    bool subset_sample_pheno_ids(const std::vector<std::string>& samp_ids, const std::vector<std::string>& pheno_ids);
+    int32_t subset_sample_indices(const std::vector<int32_t>& samp_indices);
+    int32_t subset_pheno_indices(const std::vector<int32_t>& pheno_indices);
+    bool subset_sample_pheno_indices(const std::vector<int32_t>& samp_indices, const std::vector<int32_t>& pheno_indices);
 };
 
 #endif // __ASSOC_PHENO_H

@@ -64,6 +64,7 @@ set(APP_FILES
     cmd_pair_assoc.cpp
     cmd_pair_prs.cpp
     cmd_rect_assoc.cpp
+    cmd_match_prs_pheno.cpp
 )
 
 set(SOURCE_FILES

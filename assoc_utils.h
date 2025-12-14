@@ -35,7 +35,7 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
 bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& Y,
     const Eigen::MatrixXd& X,
-    std::vector<std::vector<slr_sumstat_t>>& results);
+    std::vector<std::vector<slr_sumstat_t> >& results);
 
 Eigen::VectorXd rint_with_missing(
     const Eigen::VectorXd& values,
@@ -44,6 +44,10 @@ Eigen::VectorXd rint_with_missing(
 Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values);
 
 Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix);
+
+void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix);
+
+Eigen::VectorXd columnwise_dot(const Eigen::MatrixXd& mat1, const Eigen::MatrixXd& mat2);
 
 int32_t assoc_single_trait( 
     htsFile* wf, // output file handle

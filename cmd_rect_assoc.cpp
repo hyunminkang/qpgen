@@ -196,7 +196,7 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         if ( pheno_matrix.subset_pheno_ids(overlapping_phe_ids) != (int32_t)overlapping_phe_ids.size() ) {
             error("Failed to subset the phenotype matrix based on the provided phenotype list in %s", phelistf.c_str());
         }
-        notice("foo");
+        //notice("foo");
     }
 
     // load the variant list

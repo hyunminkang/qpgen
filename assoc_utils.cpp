@@ -1,6 +1,44 @@
 #include "assoc_utils.h"
 #include "qgenlib/qgen_error.h"
 
+
+// calculate columnwise dot product between two matrices
+Eigen::VectorXd columnwise_dot(const Eigen::MatrixXd& mat1, const Eigen::MatrixXd& mat2) {
+    const int32_t n_cols = mat1.cols();
+    const int32_t n_rows = mat1.rows();
+
+    if ( n_cols != mat2.cols() || n_rows != mat2.rows() ) {
+        error("columnwise_dot(): Matrices must have the same dimensions for columnwise dot product. Got %d x %d and %d x %d.",
+              n_rows, n_cols, mat2.rows(), mat2.cols());
+    }
+    Eigen::VectorXd result(n_cols);
+    for ( int32_t j = 0; j < n_cols; ++j ) {
+        result(j) = mat1.col(j).dot(mat2.col(j));
+    }
+    return result;
+}
+    
+
+void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix) {
+    const long n_cols = matrix.cols();
+    const long n_rows = matrix.rows();
+
+    notice("Standardizing columns of matrix with dimensions %d x %d.", n_rows, n_cols);
+
+    for (long j = 0; j < n_cols; ++j) {
+        Eigen::VectorXd col = matrix.col(j);
+        double mean = col.mean();
+        double stddev = std::sqrt((col.array() - mean).square().sum() / (n_rows - 1));
+
+        if (stddev > 0) {
+            matrix.col(j) = (col.array() - mean) / stddev;
+        } else {
+            // If stddev is zero, all values are the same. Set to zero vector.
+            matrix.col(j).setZero();
+        }
+    }
+}
+
 Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates) {
     const long g = values.rows();
     const long n = values.cols();

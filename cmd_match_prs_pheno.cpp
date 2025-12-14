@@ -1,0 +1,454 @@
+#include "qgenlib/params.h"
+#include "qgenlib/tsv_reader.h"
+#include "qgenlib/qgen_utils.h"
+#include "qgenlib/phred_helper.h"
+#include "qgenlib/hts_utils.h"
+#include "assoc_utils.h"
+#include "qpgen.h"
+#include "pheno.h"
+#include "qpgen_utils.h"
+#include "Eigen/Dense"
+#include <cmath>
+
+int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
+{
+    std::string prsf;       // PRS files
+    std::string phef;
+    std::string covf;
+    std::string sample_mapf;    // TSV file containing input sample IDs PRS and phenotype files in [PRS_SAMPLE_ID] [PHENO_SAMPLE_ID] format. If they use the same IDs, use only a single column if subsetting samples are needed
+    std::string trait_mapf;     // TSV file containing input trait IDs PRS and phenotype files in [PRS_TRAIT_ID] [PHENO_TRAIT_ID] format. If they use the same IDs, use only a single column if subsetting traits are needed
+    std::string outf;
+    std::string weightf;    // Weights file to use for each phenotype
+    std::string prs_format("regenie");
+    std::string pheno_format("regenie");
+    std::string cov_format("regenie");
+    bool rint_after_adj = false;   // Perform rank-based inverse normal transformation after covariate adjustment
+    bool use_mahalanobis = false;  // Use Mahalanobis distance for matching
+    double min_weight = 0.0;  // minimum weight (in r) per trait to set to zero
+    double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
+    double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
+    
+    paramList pl;
+
+    BEGIN_LONG_PARAMS(longParameters)
+    LONG_PARAM_GROUP("Input Options", NULL)
+    LONG_STRING_PARAM("prs", &prsf, "Input PRS file")
+    LONG_STRING_PARAM("pheno", &phef, "Input phenotype matrix")
+    LONG_STRING_PARAM("cov", &covf, "Input covariate matrix (optional)")
+    LONG_STRING_PARAM("sample-tsv", &sample_mapf, "TSV file containing input sample IDs PRS and phenotype files in [PRS_SAMPLE_ID] [PHENO_SAMPLE_ID] format. If they use the same IDs, use only a single column if subsetting samples are needed")
+    LONG_STRING_PARAM("trait-tsv", &trait_mapf, "TSV file containing input trait IDs PRS and phenotype files in [PRS_TRAIT_ID] [PHENO_TRAIT_ID] format. If they use the same IDs, use only a single column if subsetting traits are needed")
+    LONG_STRING_PARAM("weights", &weightf, "Input weights file for each phenotype in [PHENO_ID] [WEIGHT] format")
+    LONG_STRING_PARAM("prs-format", &prs_format, "Format of the PRS file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+
+    LONG_PARAM_GROUP("Output options", NULL)
+    LONG_STRING_PARAM("out", &outf, "Output prefix")
+
+    LONG_PARAM_GROUP("Analysis options", NULL)
+    LONG_PARAM("rint", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
+    LONG_PARAM("mahalanobis", &use_mahalanobis, "Use Mahalanobis distance for matching (default: false)")
+    LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
+    LONG_DOUBLE_PARAM("z-threshold", &z_lenient_threshold, "Z-score threshold for lenient matching (default: 1.96)")
+    LONG_DOUBLE_PARAM("z-diff", &z_diff_threshold, "Z-score difference to declare a clear match (default: 2.0)")
+
+    END_LONG_PARAMS();
+
+    pl.Add(new longParams("Available Options", longParameters));
+    pl.Read(argc, argv);
+    pl.Status();
+
+    // load ID mapping between PRS and phenotype files
+    // std::map<std::string, std::vector<std::string> > sample_map_prs2phe; // A PRS sample ID can have multiple phenotype IDs
+    // std::map<std::string, std::string> sample_map_phe2prs;               // A phenotype sample ID maps to a single PRS sample ID
+    // if ( !sample_mapf.empty() ) {
+    //     notice("Loading sample ID files from %s", sample_mapf.c_str());
+    //     tsv_reader tr_sample_map(sample_mapf.c_str());
+    //     while( tr_sample_map.read_line() ) {
+    //         if ( tr_sample_map.nfields == 1 ) {
+    //             std::string id = tr_sample_map.str_field_at(0);
+    //             if ( sample_map_phe2prs.find(id) != sample_map_phe2prs.end() ) {
+    //                 error("Phenotype sample ID %s in mapping file %s maps to multiple PRS sample IDs (%s and %s). Each phenotype sample ID must map to a single PRS sample ID.", phe_id.c_str(), sample_mapf.c_str(), sample_map_phe2prs[phe_id].c_str(), prs_id.c_str());
+    //             }
+    //             sample_map_prs2phe[id].push_back(id);
+    //             sample_map_phe2prs[id] = id;
+    //         }
+    //         else if ( tr_sample_map.nfields == 2 ) {
+    //             std::string prs_id = tr_sample_map.str_field_at(0);
+    //             std::string phe_id = tr_sample_map.str_field_at(1);
+    //             if ( sample_map_phe2prs.find(phe_id) != sample_map_phe2prs.end() ) {
+    //                 error("Phenotype sample ID %s in mapping file %s maps to multiple PRS sample IDs (%s and %s). Each phenotype sample ID must map to a single PRS sample ID.", phe_id.c_str(), sample_mapf.c_str(), sample_map_phe2prs[phe_id].c_str(), prs_id.c_str());
+    //             }
+    //             sample_map_prs2phe[prs_id].push_back(phe_id);
+    //             sample_map_phe2prs[phe_id] = prs_id;
+    //         }
+    //         else {
+    //             error("Invalid format sample ID mapping file %s in line %zu starting with %s. Must containing 1 or 2 fields", sample_mapf.c_str(), (int32_t)sample_mapf.size() + 1, tr_sample_map.str_field_at(0) );
+    //         }
+    //     }
+    //     if ( sample_map_prs2phe.size() == 0 ) {
+    //         error("No valid sample ID mappings found in file %s", sample_mapf.c_str());
+    //     }
+    // }
+
+    // std::map<std::string, std::string> trait_map_prs2phe; // A PRS trait ID maps to a single phenotype ID
+    // std::map<std::string, std::string> trait_map_phe2prs; // A phenotype trait ID maps to a single PRS ID
+    // if ( !trait_mapf.empty() ) {
+    //     notice("Loading trait ID mapping between PRS and phenotype files from %s", trait_mapf.c_str());
+    //     tsv_reader tr_trait_map(trait_mapf.c_str());
+    //     while( tr_trait_map.read_line() ) {
+    //         if ( tr_trait_map.nfields > 2 ) {
+    //             error("Invalid format trait ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", trait_mapf.c_str(), (int32_t)trait_mapf.size() + 1, tr_trait_map.str_field_at(0) );
+    //         }
+    //         std::string prs_id = tr_trait_map.str_field_at(0);
+    //         std::string phe_id = tr_trait_map.str_field_at(tr_trait_map.nfields == 1 ? 0 : 1);
+    //         if ( trait_map_prs2phe.find(prs_id) != trait_map_prs2phe.end() ) {
+    //             error("PRS trait ID %s in mapping file %s maps to multiple phenotype trait IDs (%s and %s). Each PRS trait ID must map to a single phenotype trait ID.", prs_id.c_str(), trait_mapf.c_str(), trait_map_prs2phe[prs_id].c_str(), phe_id.c_str());
+    //         }
+    //         if ( trait_map_phe2prs.find(phe_id) != trait_map_phe2prs.end() ) {
+    //             error("Phenotype trait ID %s in mapping file %s maps to multiple PRS trait IDs (%s and %s). Each phenotype trait ID must map to a single PRS trait ID.", phe_id.c_str(), trait_mapf.c_str(), trait_map_phe2prs[phe_id].c_str(), prs_id.c_str());
+    //         }
+    //         trait_map_prs2phe[prs_id] = phe_id;
+    //         trait_map_phe2prs[phe_id] = prs_id;
+    //     }
+    //     if ( trait_map_prs2phe.size() == 0 ) {
+    //         error("No valid trait ID mappings found in file %s", trait_mapf.c_str());
+    //     }
+    // }
+
+    // Load the weight file
+    std::map<std::string, double> phe_weights;
+    if ( !weightf.empty() ) {
+        notice("Loading phenotype weights from %s", weightf.c_str());
+        tsv_reader tr_weight(weightf.c_str());
+        while( tr_weight.read_line() ) {
+            if ( tr_weight.nfields < 2 ) {
+                error("Invalid format weights file %s in line %zu starting with %s. Must containing at least 2 fields", weightf.c_str(), (int32_t)weightf.size() + 1, tr_weight.str_field_at(0) );
+            }
+            std::string phe_id = tr_weight.str_field_at(0);
+            double weight = tr_weight.double_field_at(1);
+            phe_weights[phe_id] = weight;
+        }
+        if ( phe_weights.size() == 0 ) {
+            error("No valid phenotype weights found in file %s", weightf.c_str());
+        }
+    }
+
+    notice("Loading phenotype matrix from %s", phef.c_str());
+
+    // load the phenotype matrix
+    PhenoMatrix pheno_matrix;
+    if ( !pheno_matrix.load_pheno_matrix(phef.c_str(), pheno_format.c_str()) ) {
+        error("Failed to load the phenotype matrix from file %s", phef.c_str());
+    }
+
+    notice("Loaded phenotype matrix with %d samples and %d phenotypes from %s", (int32_t)pheno_matrix.samp_ids.size(), (int32_t)pheno_matrix.pheno_ids.size(), phef.c_str());
+
+    notice("Loading PRS matrix from %s", prsf.c_str());
+    // load the PRS matrix
+    PhenoMatrix prs_matrix;
+    if ( !prs_matrix.load_pheno_matrix(prsf.c_str(), prs_format.c_str()) ) {
+        error("Failed to load the PRS matrix from file %s", prsf.c_str());
+    }
+
+    notice("Loaded PRS matrix with %d samples and %d traits from %s", (int32_t)prs_matrix.samp_ids.size(), (int32_t)prs_matrix.pheno_ids.size(), prsf.c_str());
+
+    // load the covariance matrix
+    PhenoMatrix cov_matrix;
+    if ( !covf.empty() ) {
+        notice("Loading covariate matrix from %s", covf.c_str());
+        if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str()) ) {
+            error("Failed to load the covariate matrix from file %s", covf.c_str());
+        }
+        notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf.c_str());
+    }
+
+    // subset to overlapping phenotypes
+    std::vector<int32_t> phe_pheno_indices;
+    std::vector<int32_t> prs_pheno_indices;
+    if ( trait_mapf.empty() ) { // identify overlapping phenotypes based on names
+        std::vector<std::string> overlapping_phenos;
+        identify_overlapping_ids(prs_matrix.pheno_ids, pheno_matrix.pheno_ids, overlapping_phenos);
+        notice("Found %d overlapping phenotypes between PRS and phenotype matrices based on phenotype IDs", (int32_t)overlapping_phenos.size());
+        if ( overlapping_phenos.size() == 0 ) {
+            error("No overlapping phenotypes found between PRS and phenotype matrices. Please check if the phenotype IDs are consistent across the files or provide a trait ID mapping file using --trait-tsv option.");
+        }
+        pheno_matrix.subset_pheno_ids(overlapping_phenos);
+        prs_matrix.subset_pheno_ids(overlapping_phenos);
+    }
+    else {
+        notice("Loading trait ID mapping between PRS and phenotype files from %s", trait_mapf.c_str());
+        tsv_reader tr_trait_map(trait_mapf.c_str());
+        while( tr_trait_map.read_line() ) {
+            if ( tr_trait_map.nfields > 2 ) {
+                error("Invalid format trait ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", trait_mapf.c_str(), (int32_t)trait_mapf.size() + 1, tr_trait_map.str_field_at(0) );
+            }
+            std::string prs_id = tr_trait_map.str_field_at(0);
+            std::string phe_id = tr_trait_map.str_field_at(tr_trait_map.nfields == 1 ? 0 : 1);
+            std::map<std::string, int32_t>::const_iterator it_prs = prs_matrix.pheno_id2idx.find(prs_id);
+            std::map<std::string, int32_t>::const_iterator it_phe = pheno_matrix.pheno_id2idx.find(phe_id);
+            if ( it_prs == prs_matrix.pheno_id2idx.end() ) {
+                error("PRS trait ID %s in mapping file %s not found in PRS matrix", prs_id.c_str(), trait_mapf.c_str());
+            }
+            if ( it_phe == pheno_matrix.pheno_id2idx.end() ) {
+                error("Phenotype trait ID %s in mapping file %s not found in phenotype matrix", phe_id.c_str(), trait_mapf.c_str());
+            }
+            prs_pheno_indices.push_back( it_prs->second );
+            phe_pheno_indices.push_back( it_phe->second );
+        }
+        pheno_matrix.subset_pheno_indices( phe_pheno_indices );
+        prs_matrix.subset_pheno_indices( prs_pheno_indices );
+    }
+
+    // after the subsetting, the number of phenotypes in both matrices should be the same
+    if ( pheno_matrix.pheno_ids.size() != prs_matrix.pheno_ids.size() ) {
+        error("Number of phenotypes after subsetting do not match between phenotype and PRS matrices (%d vs %d)", (int32_t)pheno_matrix.pheno_ids.size(), (int32_t)prs_matrix.pheno_ids.size());
+    }
+    notice("Subsetted to %d overlapping phenotypes between PRS and phenotype matrices", (int32_t)pheno_matrix.pheno_ids.size());
+
+    // if covariates are provided, subset to overlapping samples
+    if ( !covf.empty() ) {
+        std::vector<std::string> overlapping_samples;
+        identify_overlapping_ids(pheno_matrix.samp_ids, cov_matrix.samp_ids, overlapping_samples);
+        notice("Found %d overlapping samples between phenotype and covariate matrices", (int32_t)overlapping_samples.size());
+        if ( overlapping_samples.size() == 0 ) {
+            error("No overlapping samples found between phenotype and covariate matrices. Please check if the sample IDs are consistent across the files.");
+        }
+        pheno_matrix.subset_sample_ids(overlapping_samples);
+        cov_matrix.subset_sample_ids(overlapping_samples);
+        notice("Subsetted phenotype and covariate matrices to %d overlapping samples", (int32_t)overlapping_samples.size());
+
+        notice("Adjusting phenotypes by covariates using linear regression");
+        if ( pheno_matrix.has_missing || cov_matrix.has_missing ) {
+            error("Covariate adjustment is currently only supported for phenotype and covariate matrices without missing values");
+        }
+        else {
+            pheno_matrix.pheno_mat = pheno_adj_cov_nxt_without_missing(pheno_matrix.pheno_mat, cov_matrix.pheno_mat);
+        }
+    }
+
+    if ( rint_after_adj ) {
+        notice("Performing rank-based inverse normal transformation for all phenotypes after covariate adjustment");
+        if ( !pheno_matrix.has_missing ) {
+            pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
+        }
+        else {
+            error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
+        }
+    }
+
+    // construct matching ID maps
+    std::vector<int32_t> matching_prs_samp_indices;
+    std::vector<int32_t> matching_pheno_samp_indices;
+    std::map<int32_t, int32_t> samp_idx_pheno2prs;
+    bool has_sample_map = !sample_mapf.empty();
+    bool has_trait_map = !trait_mapf.empty();
+
+    // identify PRS samples to use
+    if ( has_sample_map ) {
+        notice("Loading sample ID mapping between PRS and phenotype files from %s", sample_mapf.c_str());
+        tsv_reader tr_sample_map(sample_mapf.c_str());
+        while( tr_sample_map.read_line() ) {
+            if ( tr_sample_map.nfields > 2 ) {
+                error("Invalid format sample ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", sample_mapf.c_str(), (int32_t)sample_mapf.size() + 1, tr_sample_map.str_field_at(0) );
+            }
+            std::string prs_id = tr_sample_map.str_field_at(0);
+            std::string phe_id = tr_sample_map.str_field_at(tr_sample_map.nfields == 1 ? 0 : 1);
+            std::map<std::string, int32_t>::const_iterator it_prs = prs_matrix.samp_id2idx.find(prs_id);
+            std::map<std::string, int32_t>::const_iterator it_phe = pheno_matrix.samp_id2idx.find(phe_id);
+            if ( it_prs == prs_matrix.samp_id2idx.end() ) {
+                error("PRS trait ID %s in mapping file %s not found in PRS matrix", prs_id.c_str(), sample_mapf.c_str());
+            }
+            if ( it_phe == pheno_matrix.samp_id2idx.end() ) {
+                error("Phenotype trait ID %s in mapping file %s not found in phenotype matrix", phe_id.c_str(), sample_mapf.c_str());
+            }
+            matching_prs_samp_indices.push_back( it_prs->second );
+            matching_pheno_samp_indices.push_back( it_phe->second );
+            samp_idx_pheno2prs[it_phe->second] = it_prs->second;
+        }
+        notice("Found %d overlapping samples between PRS and phenotype matrices based on sample ID mapping file", (int32_t)matching_pheno_samp_indices.size());
+    }
+    else { // identify overlapping samples based on names
+        for(int32_t i=0; i < pheno_matrix.samp_ids.size(); ++i ) {
+            const std::string& samp_id = pheno_matrix.samp_ids[i];
+            std::map<std::string, int32_t>::const_iterator it = prs_matrix.samp_id2idx.find( samp_id );
+            if ( it != prs_matrix.samp_id2idx.end() ) {
+                matching_pheno_samp_indices.push_back( i );
+                matching_prs_samp_indices.push_back( it->second );
+                samp_idx_pheno2prs[i] = it->second;
+            }
+        }
+        notice("Found %d overlapping samples between PRS and phenotype matrices based on sample IDs", (int32_t)matching_pheno_samp_indices.size());
+    }
+
+    // standardize each trait
+    notice("Standardizing PRS and phenotype matrices");
+    standardize_matrix_columns_inplace(prs_matrix.pheno_mat);
+    standardize_matrix_columns_inplace(pheno_matrix.pheno_mat);
+
+    // for PRS X, and phenotype Y, compute column-wise correlation between X and Y
+    Eigen::VectorXd weights( pheno_matrix.pheno_ids.size() );
+    if ( weightf.empty() ) {
+        notice("Computing weights for each phenotype");
+        //Eigen::VectorXd weights = columnwise_dot(prs_matrix.pheno_mat, pheno_matrix.pheno_mat) / (double)n_overlapping_samples;
+        for(int32_t i=0; i < pheno_matrix.pheno_ids.size(); ++i) {
+            double r = 0;
+            for(int32_t j=0; j < matching_pheno_samp_indices.size(); ++j) {
+                r += prs_matrix.pheno_mat( matching_prs_samp_indices[j], i ) * pheno_matrix.pheno_mat( matching_pheno_samp_indices[j], i );
+            }
+            weights[i] = r / (double)matching_pheno_samp_indices.size();
+        }
+
+        htsFile* wf = hts_open((outf + ".weights.tsv.gz").c_str(), "wz");
+        if ( wf == NULL ) {
+            error("Cannot open output file %s.weights.tsv for writing", outf.c_str());
+        }
+        hprintf(wf, "Trait\tWeight\n");
+        for ( int32_t i = 0; i < weights.size(); ++i) {
+            hprintf(wf, "%s\t%.6f\n", pheno_matrix.pheno_ids[i].c_str(), weights[i]);
+        }
+        hts_close(wf);
+    }
+    else {
+        notice("Using provided weights for each phenotype from %s", weightf.c_str());
+        for(int32_t i=0; i < pheno_matrix.pheno_ids.size(); ++i) {
+            std::map<std::string, double>::const_iterator it = phe_weights.find( pheno_matrix.pheno_ids[i] );
+            if ( it == phe_weights.end() ) {
+                notice("No weight found for phenotype %s in weights file %s, setting weight to 0", pheno_matrix.pheno_ids[i].c_str(), weightf.c_str());
+                weights[i] = 0.0;
+            }
+            else {
+                weights[i] = it->second;
+            }
+        }
+    }
+
+    // set weights with abs value < min_weight to zero
+    int32_t n_pass_weights = 0;
+    for ( int32_t i = 0; i < weights.size(); ++i ) {
+        if ( weights[i] < min_weight ) {
+            weights[i] = 0.0;
+        }
+        else {
+            n_pass_weights++;
+        }
+    }
+    notice("%d / %zu phenotypes passed the minimum weight threshold of %.4f", n_pass_weights, weights.size(), min_weight);
+
+    // calculate all pair weighted correlations [n_prs x n_pheno] matrix
+    notice("Computing all pair weighted correlations between PRS traits and phenotypes");
+    Eigen::MatrixXd all_pair_wcor = prs_matrix.pheno_mat * weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() / ( weights.array().abs().sum() + 1e-100 );
+
+    notice("Standardizing all pair weighted correlation matrix");
+    // copy the weighted correlation matrix
+    Eigen::MatrixXd all_pair_z = all_pair_wcor;
+    // Apply column-wise standardization
+    standardize_matrix_columns_inplace(all_pair_z);
+
+    // open the output file gz or plain based on the extension
+    htsFile* wf1 = hts_open((outf + ".match.assigned.tsv.gz").c_str(), "wz");
+    if ( wf1 == NULL ) {
+        error("Cannot open output file %s.match.assigned.tsv.gz for writing", outf.c_str());
+    }
+    htsFile* wf2 = hts_open((outf + ".match.all.tsv.gz").c_str(), "wz");
+    if ( wf2 == NULL ) {
+        error("Cannot open output file %s.match.all.tsv.gz for writing", outf.c_str());
+    }
+ 
+    // write the header line
+    hprintf(wf1, "ID.Pheno\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\n");
+    hprintf(wf2, "ID.Pheno\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\tID.1st\tZ.1st\tCOR.1st\tID.2nd\tZ.2nd\tCOR.2nd\tID.3rd\tZ.3rd\tCOR.3rd\tID.4th\tZ.4th\tCOR.4th\tID.5th\tZ.5th\tCOR.5th\n");
+    for ( int32_t i = 0; i < pheno_matrix.samp_ids.size(); ++i ) {
+        // find the best and second best matches
+        notice("foo %d", i); 
+        int32_t self_idx = -1;
+        if ( samp_idx_pheno2prs.find(i) != samp_idx_pheno2prs.end() ) {
+            self_idx = samp_idx_pheno2prs[i];
+        }
+        int32_t self_rank = 1;
+        double z_self = self_idx >=0 ? all_pair_z(self_idx, i) : -9999.0;
+        double cor_self = self_idx >=0 ? all_pair_wcor(self_idx, i) : -9999.0;
+        double idx_top[5] = { -1, -1, -1, -1, -1 };
+        double z_top[5] = { -9999.0, -9999.0, -9999.0, -9999.0, -9999.0 };
+        double cor_top[5] = { -9999.0, -9999.0, -9999.0, -9999.0, -9999.0 };
+        for( int32_t j = 0; j < prs_matrix.samp_ids.size(); ++j ) {
+            double z = all_pair_z(j, i);
+            double cor = all_pair_wcor(j, i);
+            if ( self_idx >= 0 && j != self_idx && z > z_self ) {
+                self_rank++;
+            }
+            // check if this is in the top 5
+            for ( int32_t k = 0; k < 5; ++k ) {
+                if ( z > z_top[k] ) {
+                    // shift down
+                    for ( int32_t l = 4; l > k; --l ) {
+                        z_top[l] = z_top[l-1];
+                        cor_top[l] = cor_top[l-1];
+                        idx_top[l] = idx_top[l-1];
+                    }
+                    z_top[k] = z;
+                    cor_top[k] = cor;
+                    idx_top[k] = j;
+                    break;
+                }
+            }
+        }
+        if ( self_idx >= 0 ) {
+            const char* match_status = ( self_rank == 1 ? "BEST_MATCH" : ( z_self < z_lenient_threshold ? "NO_MATCH" : "LENIENT_MATCH" ) );
+            hprintf(wf1, "%s\t%s\t%s\t%.6f\t%.6f\t%d\n",
+                pheno_matrix.samp_ids[i].c_str(),
+                match_status,
+                prs_matrix.samp_ids[self_idx].c_str(),
+                z_self, cor_self,
+                self_rank);
+        }
+        const char* match_status = "UNCLEAR";
+        if ( self_rank == 1 ) {
+            match_status = "SELF_BEST";
+        }
+        else if ( z_top[0] > z_top[1] + z_diff_threshold ) {
+            match_status = "SINGLE_NEW_BEST";
+        }
+        else {
+            if ( z_self > z_lenient_threshold ) {
+                match_status = "SELF_LENIENT";
+            }
+            for(int32_t k=2; k < 5; ++k ) {
+                if ( z_top[k-1] > z_top[k] + z_diff_threshold ) {
+                    match_status = "MULTI_NEW_BEST";
+                    break;
+                }
+            }
+        }
+        if ( self_idx >= 0 ) {
+            hprintf(wf2, "%s\t%s\t%.6f\t%.6f\t%d",
+                pheno_matrix.samp_ids[i].c_str(),
+                match_status,
+                z_self, cor_self,
+                self_rank);
+        }
+        else {
+            hprintf(wf2, "%s\t%s\tNA\tNA\tNA",
+                pheno_matrix.samp_ids[i].c_str(),
+                match_status);
+        }
+        for ( int32_t k = 0; k < 5; ++k ) {
+            if ( idx_top[k] >=0 ) {
+                hprintf(wf2, "\t%s\t%.6f\t%.6f",
+                    prs_matrix.samp_ids[ (int32_t)idx_top[k] ].c_str(),
+                    z_top[k],
+                    cor_top[k]);
+            }
+            else {
+                hprintf(wf2, "\tNA\tNA\tNA");
+            }
+        }
+        hprintf(wf2, "\n");
+    }
+    hts_close(wf1); // close the output file
+    hts_close(wf2); // close the output file
+
+ 
+    notice("Analysis finished");
+    return 0;
+}

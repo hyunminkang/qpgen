@@ -5,63 +5,198 @@
 
 #include <cstring>
 
-int32_t PhenoMatrix::subset_sample_ids(const std::vector<std::string>& samp_ids) {
-    // identify overlapping indices
-    std::vector<int32_t> phe_sample_indices;
-    std::vector<int32_t> given_sample_indices;
-    int32_t n_overlaps = index_overlapping_ids(this->samp_ids, samp_ids, phe_sample_indices, given_sample_indices);
-    if ( n_overlaps == 0 ) {
-        error("No overlapping sample IDs found between phenotype matrix and given sample IDs");
+bool PhenoMatrix::subset_sample_pheno_indices(const std::vector<int32_t>& samp_indices, const std::vector<int32_t>& pheno_indices) {
+    if ( samp_indices.size() == this->samp_ids.size() && pheno_indices.size() == this->pheno_ids.size() ) {
+        bool change_needed = false;
+        for ( int i = 0; i < samp_indices.size(); ++i ) {
+            if ( samp_indices[i] != i ) {
+                change_needed = true;
+                break;
+            }
+        }
+        if ( !change_needed ) {
+            for ( int j = 0; j < pheno_indices.size(); ++j ) {
+                if ( pheno_indices[j] != j ) {
+                    change_needed = true;
+                    break;
+                }
+            }
+        }
+        if ( !change_needed ) {
+            return true;
+        }
     }
-    // subset the phenotype matrix
-    Eigen::MatrixXd pheno_mat_sub(n_overlaps, pheno_mat.cols());
-    Eigen::Vector<bool, Eigen::Dynamic> pheno_mask_sub(n_overlaps, pheno_mat.cols());
-    std::vector<std::string> samp_ids_sub(n_overlaps);
-    for ( int32_t i = 0; i < n_overlaps; ++i ) {
-        pheno_mat_sub.row(i) = pheno_mat.row( phe_sample_indices[i] );
-        pheno_mask_sub.row(i) = pheno_mask.row( phe_sample_indices[i] );
-        samp_ids_sub[i] = this->samp_ids[ phe_sample_indices[i] ];
+
+    std::vector<std::string> samp_ids_sub;
+    std::vector<std::string> pheno_ids_sub;
+    Eigen::MatrixXd pheno_mat_sub(samp_indices.size(), pheno_indices.size());
+    Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> pheno_mask_sub(samp_indices.size(), pheno_indices.size());
+    std::vector<genomeLocus> pheno_loci_sub;
+    for ( size_t i = 0; i < samp_indices.size(); ++i ) {
+        int32_t sidx = samp_indices[i];
+        if ( sidx < 0 || sidx >= (int32_t)samp_ids.size() ) {
+            error("Sample index %d is out of bounds [0,%d)", sidx, (int32_t)samp_ids.size());
+        }
+        samp_ids_sub.push_back( samp_ids[sidx] );
+        for ( size_t j = 0; j < pheno_indices.size(); ++j ) {
+            int32_t pidx = pheno_indices[j];
+            if ( pidx < 0 || pidx >= (int32_t)this->pheno_ids.size() ) {
+                error("Phenotype index %d is out of bounds [0,%d)", pidx, (int32_t)this->pheno_ids.size());
+            }
+            if ( i == 0 ) {
+                pheno_ids_sub.push_back( this->pheno_ids[pidx] );
+                if ( has_loci ) {
+                    pheno_loci_sub.push_back( this->pheno_loci[pidx] );
+                }
+            }
+            pheno_mat_sub(i,j) = pheno_mat(sidx, pidx);
+            pheno_mask_sub(i,j) = pheno_mask(sidx, pidx);
+        }
     }
     pheno_mat = pheno_mat_sub;
     pheno_mask = pheno_mask_sub;
     this->samp_ids = samp_ids_sub;
-    return n_overlaps;
-} 
-
-int32_t PhenoMatrix::subset_pheno_ids(const std::vector<std::string>& pheno_ids) {
-    // identify overlapping indices
-    std::vector<int32_t> phe_pheno_indices;
-    std::vector<int32_t> given_pheno_indices;
-    int32_t n_overlaps = index_overlapping_ids(this->pheno_ids, pheno_ids, phe_pheno_indices, given_pheno_indices);
-    //notice("Found %d overlapping phenotype IDs between phenotype matrix and given phenotype IDs", n_overlaps);
-    if ( n_overlaps == 0 ) {
-        error("No overlapping phenotype IDs found between phenotype matrix and given phenotype IDs");
+    this->pheno_ids = pheno_ids_sub;
+    if ( has_loci ) {
+        this->pheno_loci = pheno_loci_sub; 
     }
-    // subset the phenotype matrix
-    Eigen::MatrixXd pheno_mat_sub(pheno_mat.rows(), n_overlaps);
-    Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> pheno_mask_sub(pheno_mat.rows(), n_overlaps);
-    std::vector<std::string> pheno_ids_sub(n_overlaps);
-    std::vector<genomeLocus> pheno_loci_sub;
-    for ( int32_t i = 0; i < n_overlaps; ++i ) {
-        pheno_mat_sub.col(i) = pheno_mat.col( phe_pheno_indices[i] );
-        pheno_mask_sub.col(i) = pheno_mask.col( phe_pheno_indices[i] );
-        pheno_ids_sub[i] = this->pheno_ids[ phe_pheno_indices[i] ];
-        if ( has_loci ) {
-            pheno_loci_sub.push_back( this->pheno_loci[ phe_pheno_indices[i] ] );
+    rebuild_id2index_map(samp_ids, samp_id2idx);
+    rebuild_id2index_map(pheno_ids, pheno_id2idx);
+    return true;
+}
+
+int32_t PhenoMatrix::subset_pheno_indices(const std::vector<int32_t>& pheno_indices) {
+    if ( pheno_indices.size() == this->pheno_ids.size() ) {
+        bool change_needed = false;
+        for ( int j = 0; j < pheno_indices.size(); ++j ) {
+            if ( pheno_indices[j] != j ) {
+                change_needed = true;
+                break;
+            }
         }
+        if ( !change_needed ) {
+            return (int32_t)this->pheno_ids.size();
+        }
+    }
+
+    std::vector<std::string> pheno_ids_sub;
+    Eigen::MatrixXd pheno_mat_sub(pheno_mat.rows(), pheno_indices.size());
+    Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> pheno_mask_sub(pheno_mat.rows(), pheno_indices.size());
+    std::vector<genomeLocus> pheno_loci_sub;
+    for ( size_t j = 0; j < pheno_indices.size(); ++j ) {
+        int32_t idx = pheno_indices[j];
+        if ( idx < 0 || idx >= (int32_t)pheno_ids.size() ) {
+            error("Phenotype index %d is out of bounds [0,%d)", idx, (int32_t)this->pheno_ids.size());
+        }
+        pheno_ids_sub.push_back( pheno_ids[idx] );
+        if ( has_loci ) {
+            pheno_loci_sub.push_back( pheno_loci[idx] );
+        }
+        pheno_mat_sub.col(j) = pheno_mat.col( idx );
+        pheno_mask_sub.col(j) = pheno_mask.col( idx );
     }
     pheno_mat = pheno_mat_sub;
     pheno_mask = pheno_mask_sub;
     this->pheno_ids = pheno_ids_sub;
     if ( has_loci ) {
         this->pheno_loci = pheno_loci_sub;
-        this->pheno_locusmap.clear();
-        for ( int32_t i = 0; i < (int32_t)pheno_loci_sub.size(); ++i ) {
-            const genomeLocus& locus = pheno_loci_sub[i];
-            this->pheno_locusmap.add( locus.chrom.c_str(), locus.beg1, locus.end0, i );
+    }
+
+    rebuild_id2index_map(pheno_ids, pheno_id2idx);
+
+    return (int32_t)this->pheno_ids.size();
+}
+
+int32_t PhenoMatrix::subset_sample_indices(const std::vector<int32_t>& samp_indices) {
+    if ( samp_indices.size() == this->samp_ids.size() ) {
+        bool change_needed = false;
+        for ( int i = 0; i < samp_indices.size(); ++i ) {
+            if ( samp_indices[i] != i ) {
+                change_needed = true;
+                break;
+            }
+        }
+        if ( !change_needed ) {
+            return (int32_t)this->samp_ids.size();
         }
     }
-    return n_overlaps;
+
+    std::vector<std::string> samp_ids_sub;
+    Eigen::MatrixXd pheno_mat_sub(samp_indices.size(), pheno_mat.cols());
+    Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> pheno_mask_sub(samp_indices.size(), pheno_mat.cols());
+    for ( size_t i = 0; i < samp_indices.size(); ++i ) {
+        int32_t idx = samp_indices[i];
+        if ( idx < 0 || idx >= (int32_t)samp_ids.size() ) {
+            error("Sample index %d is out of bounds [0,%d)", idx, (int32_t)samp_ids.size());
+        }
+        samp_ids_sub.push_back( samp_ids[idx] );
+        pheno_mat_sub.row(i) = pheno_mat.row( idx );
+        pheno_mask_sub.row(i) = pheno_mask.row( idx );
+    }
+    pheno_mat = pheno_mat_sub;
+    pheno_mask = pheno_mask_sub;
+    this->samp_ids = samp_ids_sub;
+
+    rebuild_id2index_map(samp_ids, samp_id2idx);
+
+    return (int32_t)this->samp_ids.size();
+}
+
+bool PhenoMatrix::subset_sample_pheno_ids(const std::vector<std::string>& samp_ids, const std::vector<std::string>& pheno_ids) {
+    std::vector<int32_t> phe_sample_indices;
+    std::vector<int32_t> phe_pheno_indices;
+    for(int32_t i = 0; i < samp_ids.size(); ++i ) {
+        const std::string& sid = samp_ids[i];
+        std::map<std::string, int32_t>::const_iterator it = samp_id2idx.find( sid );
+        if ( it != samp_id2idx.end() ) {
+            phe_sample_indices.push_back( it->second );
+        }
+        else {
+            error("Sample ID '%s' not found in phenotype matrix", sid.c_str());
+        }
+    }
+    for(int32_t i = 0; i < pheno_ids.size(); ++i ) {
+        const std::string& pid = pheno_ids[i];
+        std::map<std::string, int32_t>::const_iterator it = pheno_id2idx.find( pid );
+        if ( it != pheno_id2idx.end() ) {
+            phe_pheno_indices.push_back( it->second );
+        }
+        else {
+            error("Phenotype ID '%s' not found in phenotype matrix", pid.c_str());
+        }
+    }
+    return subset_sample_pheno_indices(phe_sample_indices, phe_pheno_indices);
+}
+
+
+int32_t PhenoMatrix::subset_sample_ids(const std::vector<std::string>& samp_ids) {
+    std::vector<int32_t> phe_sample_indices;
+    for(int32_t i = 0; i < samp_ids.size(); ++i ) {
+        const std::string& sid = samp_ids[i];
+        std::map<std::string, int32_t>::const_iterator it = samp_id2idx.find( sid );
+        if ( it != samp_id2idx.end() ) {
+            phe_sample_indices.push_back( it->second );
+        }
+        else {
+            error("Sample ID '%s' not found in phenotype matrix", sid.c_str());
+        }
+    }
+    return subset_sample_indices( phe_sample_indices );
+} 
+
+int32_t PhenoMatrix::subset_pheno_ids(const std::vector<std::string>& pheno_ids) {
+    std::vector<int32_t> phe_pheno_indices;
+    for(int32_t i = 0; i < pheno_ids.size(); ++i ) {
+        const std::string& pid = pheno_ids[i];
+        std::map<std::string, int32_t>::const_iterator it = pheno_id2idx.find( pid );
+        if ( it != pheno_id2idx.end() ) {
+            phe_pheno_indices.push_back( it->second );
+        }
+        else {
+            error("Phenotype ID '%s' not found in phenotype matrix", pid.c_str());
+        }
+    }
+    return subset_pheno_indices( phe_pheno_indices );
 }
 
 bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim) {
@@ -132,6 +267,9 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         // resize to the actual number of samples
         pheno_mat.conservativeResize(nsamps, ntraits);
         pheno_mask.conservativeResize(nsamps, ntraits);
+
+        rebuild_id2index_map(samp_ids, samp_id2idx);
+        rebuild_id2index_map(pheno_ids, pheno_id2idx);
         return true;
     }
     else if ( format.compare("tsv-sample-col") == 0 ||
@@ -218,6 +356,9 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         // resize to the actual number of samples
         pheno_mat.conservativeResize(nsamps, ntraits);
         pheno_mask.conservativeResize(nsamps, ntraits);
+
+        rebuild_id2index_map(samp_ids, samp_id2idx);
+        rebuild_id2index_map(pheno_ids, pheno_id2idx);
         return true;
     }
     else {
