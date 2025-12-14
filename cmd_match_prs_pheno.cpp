@@ -58,64 +58,6 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     pl.Read(argc, argv);
     pl.Status();
 
-    // load ID mapping between PRS and phenotype files
-    // std::map<std::string, std::vector<std::string> > sample_map_prs2phe; // A PRS sample ID can have multiple phenotype IDs
-    // std::map<std::string, std::string> sample_map_phe2prs;               // A phenotype sample ID maps to a single PRS sample ID
-    // if ( !sample_mapf.empty() ) {
-    //     notice("Loading sample ID files from %s", sample_mapf.c_str());
-    //     tsv_reader tr_sample_map(sample_mapf.c_str());
-    //     while( tr_sample_map.read_line() ) {
-    //         if ( tr_sample_map.nfields == 1 ) {
-    //             std::string id = tr_sample_map.str_field_at(0);
-    //             if ( sample_map_phe2prs.find(id) != sample_map_phe2prs.end() ) {
-    //                 error("Phenotype sample ID %s in mapping file %s maps to multiple PRS sample IDs (%s and %s). Each phenotype sample ID must map to a single PRS sample ID.", phe_id.c_str(), sample_mapf.c_str(), sample_map_phe2prs[phe_id].c_str(), prs_id.c_str());
-    //             }
-    //             sample_map_prs2phe[id].push_back(id);
-    //             sample_map_phe2prs[id] = id;
-    //         }
-    //         else if ( tr_sample_map.nfields == 2 ) {
-    //             std::string prs_id = tr_sample_map.str_field_at(0);
-    //             std::string phe_id = tr_sample_map.str_field_at(1);
-    //             if ( sample_map_phe2prs.find(phe_id) != sample_map_phe2prs.end() ) {
-    //                 error("Phenotype sample ID %s in mapping file %s maps to multiple PRS sample IDs (%s and %s). Each phenotype sample ID must map to a single PRS sample ID.", phe_id.c_str(), sample_mapf.c_str(), sample_map_phe2prs[phe_id].c_str(), prs_id.c_str());
-    //             }
-    //             sample_map_prs2phe[prs_id].push_back(phe_id);
-    //             sample_map_phe2prs[phe_id] = prs_id;
-    //         }
-    //         else {
-    //             error("Invalid format sample ID mapping file %s in line %zu starting with %s. Must containing 1 or 2 fields", sample_mapf.c_str(), (int32_t)sample_mapf.size() + 1, tr_sample_map.str_field_at(0) );
-    //         }
-    //     }
-    //     if ( sample_map_prs2phe.size() == 0 ) {
-    //         error("No valid sample ID mappings found in file %s", sample_mapf.c_str());
-    //     }
-    // }
-
-    // std::map<std::string, std::string> trait_map_prs2phe; // A PRS trait ID maps to a single phenotype ID
-    // std::map<std::string, std::string> trait_map_phe2prs; // A phenotype trait ID maps to a single PRS ID
-    // if ( !trait_mapf.empty() ) {
-    //     notice("Loading trait ID mapping between PRS and phenotype files from %s", trait_mapf.c_str());
-    //     tsv_reader tr_trait_map(trait_mapf.c_str());
-    //     while( tr_trait_map.read_line() ) {
-    //         if ( tr_trait_map.nfields > 2 ) {
-    //             error("Invalid format trait ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", trait_mapf.c_str(), (int32_t)trait_mapf.size() + 1, tr_trait_map.str_field_at(0) );
-    //         }
-    //         std::string prs_id = tr_trait_map.str_field_at(0);
-    //         std::string phe_id = tr_trait_map.str_field_at(tr_trait_map.nfields == 1 ? 0 : 1);
-    //         if ( trait_map_prs2phe.find(prs_id) != trait_map_prs2phe.end() ) {
-    //             error("PRS trait ID %s in mapping file %s maps to multiple phenotype trait IDs (%s and %s). Each PRS trait ID must map to a single phenotype trait ID.", prs_id.c_str(), trait_mapf.c_str(), trait_map_prs2phe[prs_id].c_str(), phe_id.c_str());
-    //         }
-    //         if ( trait_map_phe2prs.find(phe_id) != trait_map_phe2prs.end() ) {
-    //             error("Phenotype trait ID %s in mapping file %s maps to multiple PRS trait IDs (%s and %s). Each phenotype trait ID must map to a single PRS trait ID.", phe_id.c_str(), trait_mapf.c_str(), trait_map_phe2prs[phe_id].c_str(), prs_id.c_str());
-    //         }
-    //         trait_map_prs2phe[prs_id] = phe_id;
-    //         trait_map_phe2prs[phe_id] = prs_id;
-    //     }
-    //     if ( trait_map_prs2phe.size() == 0 ) {
-    //         error("No valid trait ID mappings found in file %s", trait_mapf.c_str());
-    //     }
-    // }
-
     // Load the weight file
     std::map<std::string, double> phe_weights;
     if ( !weightf.empty() ) {
@@ -360,7 +302,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     hprintf(wf2, "ID.Pheno\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\tID.1st\tZ.1st\tCOR.1st\tID.2nd\tZ.2nd\tCOR.2nd\tID.3rd\tZ.3rd\tCOR.3rd\tID.4th\tZ.4th\tCOR.4th\tID.5th\tZ.5th\tCOR.5th\n");
     for ( int32_t i = 0; i < pheno_matrix.samp_ids.size(); ++i ) {
         // find the best and second best matches
-        notice("foo %d", i); 
+        //notice("foo %d", i); 
         int32_t self_idx = -1;
         if ( samp_idx_pheno2prs.find(i) != samp_idx_pheno2prs.end() ) {
             self_idx = samp_idx_pheno2prs[i];
