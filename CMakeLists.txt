@@ -386,7 +386,6 @@ ADD_LIBRARY(qpgen STATIC ${SOURCE_FILES})
 
 SET(APP_EXE qpgentools)
 
-#find_package(OpenMP REQUIRED)
 ADD_EXECUTABLE(${APP_EXE} ${SOURCE_FILES} ${APP_FILES})
 
 find_library(ZLIB z HINTS /usr/lib/x86_64-linux-gnu/ /usr/lib/ /usr/lib64/)
@@ -425,7 +424,19 @@ if(NOT CRYPTOLIB)
     message(FATAL_ERROR "libcrypto library not found")
 endif()
 
+if(APPLE)
+    # Check for Homebrew install path on Apple Silicon
+    if(EXISTS "/opt/homebrew/opt/libomp")
+        set(OpenMP_ROOT "/opt/homebrew/opt/libomp")
+    # Check for Homebrew install path on Intel Mac
+    elseif(EXISTS "/usr/local/opt/libomp")
+        set(OpenMP_ROOT "/usr/local/opt/libomp")
+    endif()
+endif()
+find_package(OpenMP REQUIRED)
+
 #TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
+#TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE Eigen3::Eigen ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE Eigen3::Eigen ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 #target_compile_options(${APP_EXE} PRIVATE "${OpenMP_CXX_FLAGS}")
 

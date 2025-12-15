@@ -27,6 +27,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     double min_weight = 0.0;  // minimum weight (in r) per trait to set to zero
     double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
     double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
+    int32_t n_threads = 1;
     
     paramList pl;
 
@@ -51,12 +52,18 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
     LONG_DOUBLE_PARAM("z-threshold", &z_lenient_threshold, "Z-score threshold for lenient matching (default: 1.96)")
     LONG_DOUBLE_PARAM("z-diff", &z_diff_threshold, "Z-score difference to declare a clear match (default: 2.0)")
+    LONG_INT_PARAM("threads", &n_threads, "Number of threads to use (default: 1)")
 
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+
+    if ( n_threads > 1 ) {
+        Eigen::setNbThreads(n_threads);
+        notice("Setting number of threads to %d", n_threads);
+    }
 
     // Load the weight file
     std::map<std::string, double> phe_weights;
@@ -279,7 +286,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 
     // calculate all pair weighted correlations [n_prs x n_pheno] matrix
     notice("Computing all pair weighted correlations between PRS traits and phenotypes");
-    Eigen::MatrixXd all_pair_wcor = prs_matrix.pheno_mat * weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() / ( weights.array().abs().sum() + 1e-100 );
+    Eigen::MatrixXd all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() ) / ( weights.array().abs().sum() + 1e-100 );
 
     notice("Standardizing all pair weighted correlation matrix");
     // copy the weighted correlation matrix
