@@ -285,8 +285,53 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     notice("%d / %zu phenotypes passed the minimum weight threshold of %.4f", n_pass_weights, weights.size(), min_weight);
 
     // calculate all pair weighted correlations [n_prs x n_pheno] matrix
-    notice("Computing all pair weighted correlations between PRS traits and phenotypes");
-    Eigen::MatrixXd all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() ) / ( weights.array().abs().sum() + 1e-100 );
+    Eigen::MatrixXd all_pair_wcor;
+    if ( use_mahalanobis ) {
+        notice("Using Mahalanobis distance for matching to account for correlation between traits (may take much longer time)");
+        notice("Computing PRS covariance matrix");
+        Eigen::MatrixXd prs_cov = prs_matrix.pheno_mat.transpose() * prs_matrix.pheno_mat / (double)prs_matrix.pheno_mat.rows();
+        notice("Computing phenotype covariance matrix");
+        Eigen::MatrixXd pheno_cov = pheno_matrix.pheno_mat.transpose() * pheno_matrix.pheno_mat / (double)pheno_matrix.pheno_mat.rows();
+        notice("Comptuing total covariance matrix");
+        Eigen::MatrixXd total_cov = prs_cov + pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+        notice("Inverting total covariance matrix");
+        Eigen::MatrixXd total_cov_inv = total_cov.inverse();
+
+        notice("Constructing weighted Mahalanobis matrix to multiply");
+        Eigen::MatrixXd W_sqrt = weights.cwiseSqrt().asDiagonal();
+        Eigen::MatrixXd M = W_sqrt * total_cov_inv * W_sqrt;
+
+        notice("Computing numerator for all pair weighted correlations between PRS traits and phenotypes");
+        Eigen::MatrixXd numerator = prs_matrix.pheno_mat * M * pheno_matrix.pheno_mat.transpose();
+
+        notice("Computing norms for PRS and phenotype matrices");
+        Eigen::VectorXd prs_norms = (prs_matrix.pheno_mat * M * prs_matrix.pheno_mat.transpose()).diagonal().cwiseSqrt();
+        Eigen::VectorXd pheno_norms = (pheno_matrix.pheno_mat * M * pheno_matrix.pheno_mat.transpose()).diagonal().cwiseSqrt();
+
+        // 4. Compute Correlation Matrix
+        // Divide numerator(i, j) by (prs_norm(i) * pheno_norm(j))
+        // Using broadcasting or a loop (Eigen broadcasting can be tricky, loop is safe)
+        all_pair_wcor.resize(numerator.rows(), numerator.cols());
+        notice("Computing all pair weighted correlations between PRS traits and phenotypes");
+        for (int i = 0; i < numerator.rows(); ++i) {
+            for (int j = 0; j < numerator.cols(); ++j) {
+                double denom = prs_norms(i) * pheno_norms(j);
+                all_pair_wcor(i, j) = numerator(i, j) / (denom + 1e-100);
+            }
+        }
+        //notice("Computing all pair Mahalanobis distances between PRS traits and phenotypes");
+        //all_pair_wcor = ( prs_matrix.pheno_mat * ( ( W_sqrt * total_cov_inv * W_sqrt ) * pheno_matrix.pheno_mat.transpose() ) ) / ( weights.array().abs().sum() + 1e-100 );
+
+        // notice("Computing difference between PRS and phenotype matrices");
+        // Eigen::MatrixXd diff_mat = prs_matrix.pheno_mat - pheno_matrix.pheno_mat;
+
+        // notice("Computing all pair Mahalanobis distances between PRS traits and phenotypes");
+        // all_pair_wcor =  -1 * ( diff_mat * ( ( total_cov_inv * weights.asDiagonal() ) * diff_mat.transpose() ) );
+    }
+    else {
+        notice("Computing all pair weighted correlations between PRS traits and phenotypes assuming independence");
+        all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() ) / ( weights.array().abs().sum() + 1e-100 );
+    }
 
     notice("Standardizing all pair weighted correlation matrix");
     // copy the weighted correlation matrix
