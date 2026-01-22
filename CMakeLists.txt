@@ -62,6 +62,7 @@ set(APP_FILES
     cmd_join_plp_geno.cpp
     cmd_geno2tsv.cpp
     cmd_pair_assoc.cpp
+    cmd_pair_assoc_v0.cpp
     cmd_pair_prs.cpp
     cmd_rect_assoc.cpp
     cmd_match_prs_pheno.cpp

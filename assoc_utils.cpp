@@ -766,3 +766,68 @@ int32_t assoc_single_trait(
     }
     return (int32_t)v_cpra.size(); // return the number of variants processed
 }
+
+int32_t assoc_single_trait( 
+    htsFile* wf, // output file handle
+    const char* pheno_id, // phenotype ID
+    const Eigen::VectorXd& phe_vec,      // phenotype vector
+    const Eigen::VectorXd& phe_rint_vec, // rinted phenotype vector 
+    const Eigen::Vector<bool, Eigen::Dynamic>& phe_mask_vec, // phenotype mask vector
+    bool phe_has_missing, // if the phenotype has missing values
+    bool skip_rint, // if the rank-based inverse normal transformation should be skipped
+    const Eigen::MatrixXd& geno_mat,    // genotype matrix
+    const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask,   // genotype mask matrix
+    bool geno_has_missing, // if the genotype has missing values
+    const std::vector<cpra_t>& v_cpra,      // variant pairs
+    const std::vector<int32_t>& ans,         // allele counts
+    const std::vector<double>& acs,         // allele counts
+    const std::vector<int32_t>& gc0s,     // genotype counts of 0
+    const std::vector<int32_t>& gc1s,     // genotype counts of 1
+    const std::vector<int32_t>& gc2s,     // genotype counts of
+    const std::vector<double>& infos       // infor values
+) 
+{
+    std::vector<slr_sumstat_t> sumstats;
+    std::vector<slr_sumstat_t> sumstats_rint;
+    if ( !geno_has_missing && !phe_has_missing ) {
+        simple_linear_regression_without_missing(phe_vec, geno_mat, sumstats);
+        if ( ! skip_rint ) {
+            simple_linear_regression_without_missing(phe_rint_vec, geno_mat, sumstats_rint);
+        }
+    }
+    else {
+        simple_linear_regression_with_missing(phe_vec, phe_mask_vec, geno_mat, geno_mask, sumstats);
+        if ( ! skip_rint ) {
+            simple_linear_regression_with_missing(phe_rint_vec, phe_mask_vec, geno_mat, geno_mask, sumstats_rint);
+        }
+    }
+
+    // print the results
+    for(int32_t i=0; i < (int32_t)v_cpra.size(); ++i) {
+        const slr_sumstat_t& ss = sumstats[i];
+        hprintf(wf, "%s\t%s\t%d\t%s\t%s\t%s\t%.5g\t%d\t%d\t%d\t%d\t%.6g\t%.6g\t%.6g\t%.6g",
+            pheno_id, // TRAIT
+            v_cpra[i].chrom.c_str(), // CHROM
+            v_cpra[i].pos,           // POS
+            v_cpra[i].to_string().c_str(), // ID
+            v_cpra[i].ref.c_str(),  // REF
+            v_cpra[i].alts.c_str(), // ALT
+            (double)acs[i] / (double)ans[i], // AF
+            ss.n_obs, // N - number of samples
+            gc0s[i], // GC0 - genotype count 0
+            gc1s[i], // GC1 - genotype count 1
+            gc2s[i], // GC2 - genotype count 2
+            infos[i],  // INFO - placeholder, not calculated
+            ss.beta, // BETA
+            ss.se,   // SE
+            ss.tstat, // TSTAT
+            ss.log10p); // LOG10P
+        if ( ! skip_rint ) {
+            const slr_sumstat_t& ss_rint = sumstats_rint[i];
+            hprintf(wf, "\t%.6g\t%.6g\t%.6g\t%.6g", // BETA_RINT, SE_RINT, TSTAT_RINT, LOG10P_RINT
+                ss_rint.beta, ss_rint.se, ss_rint.tstat, ss_rint.log10p);
+        }
+        hprintf(wf, "\n");
+    }
+    return (int32_t)v_cpra.size(); // return the number of variants processed
+}

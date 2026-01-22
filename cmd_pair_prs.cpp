@@ -31,7 +31,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     LONG_STRING_PARAM("pgen", &pgenf, "Input PLINK2 genotype file")
     LONG_STRING_PARAM("psam", &psamf, "Input PLINK2 sample file")
     LONG_STRING_PARAM("pivar", &pivarf, "Input PLINK2 index pvar file (bgzipped and tabix)")
-    LONG_STRING_PARAM("list", &listf, "Input file containing CHROM BEG END PGEN PSAM PIVAR")
+    LONG_STRING_PARAM("pgen-list", &listf, "Input file containing CHROM BEG END PGEN PSAM PIVAR")
     LONG_STRING_PARAM("pairs", &pairf, "Input file containing TRAIT VARIANT BETA SE summary statistics")
     LONG_STRING_PARAM("sample", &samplef, "Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files")
 

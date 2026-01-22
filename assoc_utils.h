@@ -66,5 +66,24 @@ int32_t assoc_single_trait(
     const std::vector<double>& infos       // infor values
 );
 
+int32_t assoc_single_trait( 
+    htsFile* wf, // output file handle
+    const char* pheno_id, // phenotype ID
+    const Eigen::VectorXd& phe_vec,      // phenotype vector
+    const Eigen::VectorXd& phe_rint_vec, // rinted phenotype vector 
+    const Eigen::Vector<bool, Eigen::Dynamic>& phe_mask_vec, // phenotype mask vector
+    bool phe_has_missing, // if the phenotype has missing values
+    bool skip_rint, // if the rank-based inverse normal transformation should be skipped
+    const Eigen::MatrixXd& geno_mat,    // genotype matrix
+    const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask,   // genotype mask matrix
+    bool geno_has_missing, // if the genotype has missing values
+    const std::vector<cpra_t>& v_cpra,      // variant pairs
+    const std::vector<int32_t>& ans,         // allele counts
+    const std::vector<double>& acs,         // allele counts
+    const std::vector<int32_t>& gc0s,        // genotype counts for genotype 0
+    const std::vector<int32_t>& gc1s,        // genotype counts for genotype 1
+    const std::vector<int32_t>& gc2s,        // genotype counts for genotype 2
+    const std::vector<double>& infos       // infor values
+);
 
 #endif // __ASSOC_UTILS_H
