@@ -28,7 +28,8 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
     double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
     int32_t n_threads = 1;
-    
+    double lambda = 0.0; // regularization parameter for Mahalanobis distance
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -49,6 +50,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Analysis options", NULL)
     LONG_PARAM("rint", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
     LONG_PARAM("mahalanobis", &use_mahalanobis, "Use Mahalanobis distance for matching (default: false)")
+    LONG_DOUBLE_PARAM("lambda", &lambda, "Regularization parameter for Mahalanobis distance (default: 1.0)")
     LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
     LONG_DOUBLE_PARAM("z-threshold", &z_lenient_threshold, "Z-score threshold for lenient matching (default: 1.96)")
     LONG_DOUBLE_PARAM("z-diff", &z_diff_threshold, "Z-score difference to declare a clear match (default: 2.0)")
@@ -294,6 +296,10 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         Eigen::MatrixXd pheno_cov = pheno_matrix.pheno_mat.transpose() * pheno_matrix.pheno_mat / (double)pheno_matrix.pheno_mat.rows();
         notice("Comptuing total covariance matrix");
         Eigen::MatrixXd total_cov = prs_cov + pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+        if ( lambda > 0 ) {
+            notice("Adding regularization parameter %.4f to total covariance matrix", lambda);
+            total_cov += lambda * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+        }
         notice("Inverting total covariance matrix");
         Eigen::MatrixXd total_cov_inv = total_cov.inverse();
 
@@ -415,14 +421,15 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
             }
         }
         if ( self_idx >= 0 ) {
-            hprintf(wf2, "%s\t%s\t%.6f\t%.6f\t%d",
+            hprintf(wf2, "%s\t%s\t%s\t%.6f\t%.6f\t%d",
                 pheno_matrix.samp_ids[i].c_str(),
                 match_status,
+                prs_matrix.samp_ids[self_idx].c_str(),
                 z_self, cor_self,
                 self_rank);
         }
         else {
-            hprintf(wf2, "%s\t%s\tNA\tNA\tNA",
+            hprintf(wf2, "%s\t%s\tNA\tNA\tNA\tNA",
                 pheno_matrix.samp_ids[i].c_str(),
                 match_status);
         }
