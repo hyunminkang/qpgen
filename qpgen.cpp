@@ -659,6 +659,16 @@ bool PgenIdxReader::get_genos(int32_t var_idx) {
     return true;
 }
 
+bool PgenIdxReader::sample_ids_sorted() const {
+    // sort based on indID only, since famID can be empty or "0"
+    for(int32_t i=1; i < samps.size(); ++i) {
+        if ( samps[i-1].indID.compare(samps[i].indID) > 0 ) {
+            return false; 
+        }
+    }
+    return true;
+}
+
 bool MultiPgenIdxReader::prep_pgen_list(const char* listf, const char* pgen_suffix, const char* pivar_suffix, const char* psam_suffix) {
     // read the pgen list file
     tsv_reader tr(listf);
@@ -872,6 +882,13 @@ int32_t MultiPgenIdxReader::get_loaded_sample_count() const {
         error("No PGEN files are added yet");
     }
     return p_readers[0]->get_loaded_sample_count();
+}
+
+bool MultiPgenIdxReader::sample_ids_sorted() const {
+    if ( p_readers.size() == 0 ) {
+        error("No PGEN files are added yet");
+    }
+    return p_readers[0]->sample_ids_sorted();
 }
 
 //const std::vector<int32_t>& MultiPgenIdxReader::get_loaded_sample_indices() const;

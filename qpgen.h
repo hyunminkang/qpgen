@@ -271,6 +271,8 @@ public:
     int32_t get_loaded_sample_count() const { return (int32_t)samp_idx.size(); }
     const std::vector<int32_t>& get_loaded_sample_indices() const { return samp_idx; }
     const plink_samp_t& get_loaded_sample(int32_t idx) const { return samps[samp_idx[idx]-1]; }
+
+    bool sample_ids_sorted() const;
 };
 
 class MultiPgenIdxReader {
@@ -301,6 +303,7 @@ public:
     bool set_single_chunk_pgen(const char* pgenf, const char* pivarf, const char* psamf);
 
     void subset_sample_ids(const std::vector<std::string>& samp_ids, bool exclude = false);
+    bool sample_ids_sorted() const;
 
     bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL);      // change the current variant position to a specific CPRA

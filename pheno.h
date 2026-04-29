@@ -39,6 +39,9 @@ public:
     int32_t subset_sample_indices(const std::vector<int32_t>& samp_indices);
     int32_t subset_pheno_indices(const std::vector<int32_t>& pheno_indices);
     bool subset_sample_pheno_indices(const std::vector<int32_t>& samp_indices, const std::vector<int32_t>& pheno_indices);
+
+    bool sample_ids_sorted() const;
+    bool pheno_ids_sorted() const;
 };
 
 #endif // __ASSOC_PHENO_H

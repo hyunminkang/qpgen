@@ -366,3 +366,21 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         return false;
     }
 }
+
+bool PhenoMatrix::sample_ids_sorted() const {
+    for ( size_t i = 1; i < samp_ids.size(); ++i ) {
+        if ( samp_ids[i] < samp_ids[i-1] ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool PhenoMatrix::pheno_ids_sorted() const {
+    for ( size_t i = 1; i < pheno_ids.size(); ++i ) {
+        if ( pheno_ids[i] < pheno_ids[i-1] ) {
+            return false;
+        }
+    }
+    return true;
+}

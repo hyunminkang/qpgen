@@ -166,19 +166,28 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     }
     notice("%zu overlapping samples found among sample, genotype, phenotype, and covariate files", (int32_t)overlapping_sample_ids.size());
 
-    if ( pheno_matrix.samp_ids.size() != overlapping_sample_ids.size() ) {
+    if ( !pheno_matrix.sample_ids_sorted() || ( pheno_matrix.samp_ids.size() != overlapping_sample_ids.size() ) ) {
         notice("Subsetting the phenotype matrix to the overlapping samples");
         pheno_matrix.subset_sample_ids(overlapping_sample_ids);
     }
+    else {
+        notice("No need to subset the phenotype matrix, as the sample IDs already match the overlapping samples");
+    }
     if ( !covf.empty() ) {
-        if ( cov_matrix.samp_ids.size() != overlapping_sample_ids.size() ) {
+        if ( !cov_matrix.sample_ids_sorted() || ( cov_matrix.samp_ids.size() != overlapping_sample_ids.size() ) ) {
             notice("Subsetting the covariate matrix to the overlapping samples");
             cov_matrix.subset_sample_ids(overlapping_sample_ids);
         }
+        else {
+            notice("No need to subset the covariate matrix, as the sample IDs already match the overlapping samples");
+        }
     }
-    if ( mpr.get_all_sample_count() != overlapping_sample_ids.size() ) {
+    if ( !mpr.sample_ids_sorted() ||  mpr.get_all_sample_count() != overlapping_sample_ids.size() ) {
         notice("Subsetting the genotype data to %zu overlapping samples", (int32_t)overlapping_sample_ids.size());
         mpr.subset_sample_ids(overlapping_sample_ids);
+    }
+    else {
+        notice("No need to subset the genotype data, as the sample IDs already match the overlapping samples"); 
     }
     int32_t n_overlapping_samples = (int32_t)overlapping_sample_ids.size();
 
