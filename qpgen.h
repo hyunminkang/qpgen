@@ -245,6 +245,7 @@ public:
     bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL); // change the current variant position to a specific CPRA
     bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position
+    bool compute_geno_stats();               // compute genotype counts and allele frequencies for the current variant
     bool load_psam(const char* _psamf);
     
     int32_t get_n_threads() const { return nthreads; }
@@ -308,6 +309,7 @@ public:
     bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL);      // change the current variant position to a specific CPRA
     bool get_genos();                              // read the genotypes at the current variant position
+    bool compute_geno_stats();                     // compute genotype counts and allele frequencies for the current variant
     
     int32_t get_n_threads() const { return nthreads; }
     void set_n_threads(int32_t n);

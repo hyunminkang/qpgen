@@ -36,7 +36,7 @@
 #include <stdlib.h>
 #include <memory>
 #include "pvar_ffi_support.h"
-#include "pgenlib_ffi_support.h"
+#include "include/pgenlib_ffi_support.h"
 #include "include/pgenlib_read.h"
 
 

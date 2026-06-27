@@ -541,6 +541,8 @@ bool PgenIdxReader::read_pos(const char* chrom, int32_t pos) {
         pivar_loaded = true;
     }
 
+    notice("Jumping to %s:%d in %s, icol_pivar_idx: %d", chrom, pos, pivarf.c_str(), icol_pivar_idx);
+
     tr_pivar.jump_to(chrom, pos);
     while( tr_pivar.read_line() ) { // find the variant
         if ( tr_pivar.nfields < icol_pivar_idx ) {
@@ -587,7 +589,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             tr_pivar.jump_to(cpra_obj.chrom.c_str(), cpra_obj.pos);
         }
         while( tr_pivar.read_line() ) { // find the variant
-            if ( tr_pivar.nfields < 9 ) {
+            if ( tr_pivar.nfields <= icol_pivar_idx ) {
                 error("Invalid pvar file format at %s", pivarf.c_str());
                 return false;
             }
@@ -618,7 +620,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             const char* chrom = tr_pivar.str_field_at(0);
             if ( chrom[0] == '#' ) continue;
 
-            if ( tr_pivar.nfields < 9 ) {
+            if ( tr_pivar.nfields <= icol_pivar_idx ) {
                 error("Invalid pvar file format at %s", pivarf.c_str());
                 return false;
             }
@@ -636,7 +638,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             return true;
         }
     }
-    return true;
+    return false; // reached end of file without finding the next variant
 }
 
 bool PgenIdxReader::get_genos(int32_t var_idx) {
@@ -826,6 +828,7 @@ bool MultiPgenIdxReader::read_pivar(const char* cpra) {      // change the curre
         }
     }
 }
+
 bool MultiPgenIdxReader::get_genos() {                               // read the genotypes at the current variant position
     if ( idx_cur_reader >= 0 ) {
         bool ret = p_readers[idx_cur_reader]->get_genos();
@@ -842,6 +845,14 @@ bool MultiPgenIdxReader::get_genos() {                               // read the
     }
     return false;
 }
+
+// bool MultiPgenIdxReader::compute_geno_stats() {
+//     if ( idx_cur_reader >= 0 ) {
+//         bool ret = p_readers[idx_cur_reader]->compute_geno_stats();
+//         return ret;   
+//     }
+//     return false;
+// }
 
 void MultiPgenIdxReader::set_n_threads(int32_t n) { 
     nthreads = n; 

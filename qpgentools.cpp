@@ -11,7 +11,7 @@ int32_t cmd_pair_assoc_v0(int32_t argc, char** argv);
 int32_t cmd_rect_assoc(int32_t argc, char** argv);
 int32_t cmd_pair_prs(int32_t argc, char** argv);
 int32_t cmd_match_prs_pheno(int32_t argc, char** argv);
- 
+int32_t cmd_region_assoc(int32_t argc, char** argv);
 int32_t main(int32_t argc, char** argv) {
   commandList cl;
 
@@ -21,6 +21,7 @@ int32_t main(int32_t argc, char** argv) {
     LONG_COMMAND("pair-assoc-v0", &cmd_pair_assoc_v0, "Perform pairwise association analysis for specific pairs of phenotype variant pairs (old version)")
     LONG_COMMAND("pair-prs", &cmd_pair_prs, "Perform pairwise PRS generation based on summary statistics")
     LONG_COMMAND("rect-assoc", &cmd_rect_assoc, "Perform rectangular association analysis for multiple phenotypes and variants")
+    LONG_COMMAND("region-assoc", &cmd_region_assoc, "Perform association analysis for a specific region and multiple phenotypes")
     LONG_COMMAND("match-prs-pheno", &cmd_match_prs_pheno, "Match PRS and phenotype matrices based on overlapping samples and compute weights for each phenotype")
 
     LONG_COMMAND_GROUP("Utilities for sequence data", NULL)
