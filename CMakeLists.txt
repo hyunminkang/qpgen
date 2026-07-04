@@ -61,6 +61,7 @@ set(APP_FILES
     cmd_match_plp_geno.cpp
     cmd_join_plp_geno.cpp
     cmd_geno2tsv.cpp
+    cmd_pgen2tsv.cpp
     cmd_pair_assoc.cpp
     cmd_pair_assoc_v0.cpp
     cmd_pair_prs.cpp
@@ -78,6 +79,8 @@ set(SOURCE_FILES
     qpgen_utils.h
     assoc_utils.h
     assoc_utils.cpp
+    susie_utils.h
+    susie_utils.cpp
     include/pgenlib_misc.cc
     include/pgenlib_misc.h
     include/pgenlib_read.cc

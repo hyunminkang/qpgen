@@ -4,11 +4,14 @@
 #include "qgenlib/phred_helper.h"
 #include "qgenlib/hts_utils.h"
 #include "assoc_utils.h"
+#include "susie_utils.h"
 #include "qpgen_utils.h"
 #include "qpgen.h"
 #include "pheno.h"
 #include "Eigen/Dense"
 #include <cmath>
+#include <string>
+#include <algorithm>
 
 int32_t cmd_region_assoc(int32_t argc, char **argv)
 {
@@ -31,7 +34,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     double max_ac = 1e9;
 
     int32_t jump_thres_bp = 1000000; 
-    int32_t max_chunk_vars = 1000; // Maximum number of variants to store at once in memory
+    //int32_t max_chunk_vars = 1000; // Maximum number of variants to store at once in memory
+    int32_t max_allowed_vars = 1000000; // Maximum number of variants to store at once in memory
     int32_t offset_pheno = 1; 
     int32_t offset_cov = 1;
     int32_t icol_pivar_idx = 9;
@@ -43,6 +47,22 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string colname_geno_sample("geno"); // column name for the sample IDs in the genotype file 
     bool rint_before_adj = false; // Perform rank-based inverse normal transformation before covariate adjustment
     bool rint_after_adj = false; // Perform rank-based inverse normal transformation after covariate adjustment
+
+    // SuSiE fine-mapping options
+    bool run_susie = false;
+    int32_t susie_L = 10;
+    int32_t susie_max_iter = 100;
+    double susie_coverage = 0.95;
+    double susie_min_abs_corr = 0.5;
+    double susie_tol = 1e-3;
+    bool susie_no_standardize = false;
+    bool output_lbf = false; // also write per-variant log Bayes factors
+    std::string unmappable_effects = "none"; // "none" (standard SuSiE) or "inf" (SuSiE-inf)
+
+    // suffix for the output files
+    std::string assoc_suffix = ".assoc.tsv.gz";
+    std::string susie_cs_suffix = ".susie.cs.tsv.gz";
+    std::string susie_lbf_suffix = ".susie.lbf.tsv.gz";
 
     paramList pl;
 
@@ -67,10 +87,13 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
 
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
+    LONG_STRING_PARAM("assoc-suffix", &assoc_suffix, "Suffix for the association output file (default: '.assoc.tsv.gz')")
+    LONG_STRING_PARAM("susie-cs-suffix", &susie_cs_suffix, "Suffix for the SuSiE credible set output file (default: '.susie.cs.tsv.gz')")
+    LONG_STRING_PARAM("susie-lbf-suffix", &susie_lbf_suffix, "Suffix for the SuSiE log Bayes factor output file (default: '.susie.lbf.tsv.gz')")
 
     LONG_PARAM_GROUP("Auxiliary options", NULL)
     LONG_INT_PARAM("jump-thres-bp", &jump_thres_bp, "Jump threshold in base pairs for the variant index (default: 1000000)")
-    LONG_INT_PARAM("max-chunk-vars", &max_chunk_vars, "Maximum number of variants to store at once in memory (default: 1000)")
+    LONG_INT_PARAM("max-allowed-vars", &max_allowed_vars, "Maximum number of allowed variants to store at once in memory (default: 1000000)")
     LONG_INT_PARAM("offset-pheno", &offset_pheno, "The number of index columns (i.e. not containing values) in the phenotype files (default: 1)")
     LONG_INT_PARAM("offset-cov", &offset_cov, "The number of index columns (i.e. not containing values) in the covariate columns (default: 1)")
     LONG_INT_PARAM("icol-pivar-idx", &icol_pivar_idx, "1-based column index for the variant ID in the pvar file (default: 9)")
@@ -80,6 +103,17 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("colname-geno-sample", &colname_geno_sample, "When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')")
     LONG_PARAM("rint-before-adj", &rint_before_adj, "Perform rank-based inverse normal transformation before covariate adjustment (default: false)")
     LONG_PARAM("rint-after-adj", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
+
+    LONG_PARAM_GROUP("SuSiE fine-mapping options", NULL)
+    LONG_PARAM("susie", &run_susie, "Run SuSiE fine-mapping for each tested phenotype in the region")
+    LONG_INT_PARAM("susie-L", &susie_L, "Maximum number of causal single effects (default: 10)")
+    LONG_INT_PARAM("susie-max-iter", &susie_max_iter, "Maximum number of IBSS iterations (default: 100)")
+    LONG_DOUBLE_PARAM("susie-coverage", &susie_coverage, "Target coverage of credible sets (default: 0.95)")
+    LONG_DOUBLE_PARAM("susie-min-abs-corr", &susie_min_abs_corr, "Minimum absolute correlation (purity) required to report a credible set (default: 0.5)")
+    LONG_DOUBLE_PARAM("susie-tol", &susie_tol, "Convergence tolerance for the SuSiE objective (default: 1e-3)")
+    LONG_PARAM("susie-no-standardize", &susie_no_standardize, "Do not standardize genotype columns to unit variance before SuSiE")
+    LONG_STRING_PARAM("unmappable-effects", &unmappable_effects, "Unmappable-effects model for SuSiE: 'none' (standard) or 'inf' (SuSiE-inf, adds an infinitesimal effect). Matches run_susie_v1.r --method (default: none)")
+    LONG_PARAM("output-lbf", &output_lbf, "Also write per-variant log Bayes factors (one column per single effect) when running SuSiE")
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
@@ -121,7 +155,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         error("Either --traits or --traitf must be provided");
     }
 
-    notice("Loading genotype data from pgen files with chromosome %s, position %d to %d, and maximum chunk size of %d variants", region.c_str(), 0, 0, max_chunk_vars);
+    notice("Loading genotype data from pgen files with chromosome %s, position %d to %d, and maximum chunk size of %d variants", region.c_str(), 0, 0, max_allowed_vars);
     if ( !pgenlistf.empty() ) { // list is provided
         input.process_pgenlist(pgenlistf.c_str(), phef.c_str(), pheno_format.c_str(), covf.c_str(), cov_format.c_str());
     }
@@ -137,58 +171,204 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     Eigen::MatrixXd geno_mat;
     Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> geno_mask;
     notice("icol_pivar_idx: %d", input.mpr.get_icol_pivar_idx());
-    bool first = true;
-    bool any_loaded = false;
-    int64_t total_vars = 0;
-    // load_genotype_chunk returns true (and fills geno_mat) for every chunk with >=1 variant,
-    // and false only once the region is fully streamed, so each loaded chunk is processed exactly once.
-    while ( input.load_genotype_chunk(first ? region_cbe.chrom.c_str() : NULL, region_cbe.beg1, region_cbe.end0, max_chunk_vars, geno_mat, geno_mask) ) {
-        first = false;
-        any_loaded = true;
-        total_vars += geno_mat.cols();
+    // bool first = true;
+    // bool any_loaded = false;
+    // int64_t total_vars = 0;
 
-        // perform rectangular association analysis
-        // std::vector<std::vector<slr_sumstat_t> > rect_results;
-        // notice("Performing rectangular association analysis for %d phenotypes and %d variants after skipping %d variants", (int32_t)pheno_matrix.pheno_ids.size(), new_chunk_size, n_skipped);
-        // if ( !simple_rect_regression_without_missing(
-        //         input.pheno_matrix.pheno_mat,
-        //         geno_mat,
-        //         rect_results) ) {
-        //     error("Failed to perform rectangular association analysis for chunk %d", i / max_chunk_vars + 1);
-        // }
-        // // write the results
-        // for(int32_t j=0; j < new_chunk_size; ++j) {
-        //     cpra_t cpra(chunk_cpras[j].c_str());
-        //     const var_cnt_t& vcnt = chunk_var_cnts[j];
-        //     double a1freq = (double)(vcnt.ac) / (double)(vcnt.an);
-        //     hprintf(wf, "%s\t%d\t%s\t%s\t%s\t%.6g\t%d\t%d\t%d\t%d\tLinear",
-        //         cpra.chrom.c_str(),
-        //         cpra.pos,
-        //         chunk_cpras[j].c_str(),
-        //         cpra.ref.c_str(),
-        //         cpra.alts.c_str(),
-        //         a1freq,
-        //         vcnt.an,
-        //         vcnt.gcs[0],
-        //         vcnt.gcs[1],
-        //         vcnt.gcs[2]);
-        //     const std::vector<slr_sumstat_t>& var_results = rect_results[j];
-        //     for(int32_t k=0; k < (int32_t)pheno_matrix.pheno_ids.size(); ++k) {
-        //         const slr_sumstat_t& ss = var_results[k];
-        //         hprintf(wf, "\t%.6g\t%.6g\t%.6g\t%.6g",
-        //             ss.beta,
-        //             ss.se,
-        //             ss.tstat,
-        //             ss.log10p);
-        //     }
-        //     hprintf(wf, "\n");
-        // }
+    // read all genotypes as one single chunk
+    int32_t n_loaded_vars = input.load_genotype_chunk(region_cbe.chrom.c_str(), region_cbe.beg1, region_cbe.end0, max_allowed_vars);
+    if ( n_loaded_vars >= max_allowed_vars ) {
+        error("Maximum number of allowed variants reached. Please increase the --max-chunk-vars parameter to a larger value (current value: %d)");
+    }
 
-        notice("Performing association mapping for %d variants in the region %s:%d-%d", (int32_t)geno_mat.cols(), region_cbe.chrom.c_str(), region_cbe.beg1, region_cbe.end0);
+    // perform rectangular association analysis
+    std::vector<std::vector<slr_sumstat_t> > rect_results;
+    notice("Performing rectangular association analysis...");
+    if ( !simple_rect_regression_without_missing(
+            input.pheno_matrix.pheno_mat,
+            input.geno_chunk.geno_mat,
+            rect_results) ) {
+        error("Failed to perform rectangular association analysis");
     }
-    if ( !any_loaded ) {
-        notice("No variants found in the specified region %s:%d-%d", region_cbe.chrom.c_str(), region_cbe.beg1, region_cbe.end0);
+    // write the results
+
+    std::string assoc_outf = outf + assoc_suffix;
+    htsFile* wf = hts_open(assoc_outf.c_str(), assoc_outf.substr(assoc_outf.length() - 3).compare(".gz") == 0 ? "wz" : "w");
+    if ( wf == NULL ) {
+        error("Cannot open output file %s for writing", outf.c_str());
     }
-    notice("Analysis finished. Total variants processed: %lld", (long long)total_vars);
+    // write the header line
+    hprintf(wf, "#CHROM\tGENPOS\tID\tALLELE0\tALLELE1\tA1FREQ\tN\tN_RR\tN_RA\tN_AA\tTEST");
+    for(int32_t i = 0; i < input.pheno_matrix.pheno_ids.size(); ++i) {
+        hprintf(wf, "\tBETA.%s\tSE.%s\tTSTAT.%s\tLOG10P.%s",
+                input.pheno_matrix.pheno_ids[i].c_str(),
+                input.pheno_matrix.pheno_ids[i].c_str(),
+                input.pheno_matrix.pheno_ids[i].c_str(),
+                input.pheno_matrix.pheno_ids[i].c_str());
+    }
+    hprintf(wf, "\n");
+    for(int32_t j=0; j < n_loaded_vars; ++j) {
+        const cpra_t& cpra = input.geno_chunk.v_cpra[j];
+        const var_cnt_t& vcnt = input.geno_chunk.var_cnts[j];
+        double a1freq = (double)(vcnt.ac) / (double)(vcnt.an);
+        hprintf(wf, "%s\t%d\t%s\t%s\t%s\t%.6g\t%d\t%d\t%d\t%d\tLinear",
+            cpra.chrom.c_str(),
+            cpra.pos,
+            cpra.to_string().c_str(),
+            cpra.ref.c_str(),
+            cpra.alts.c_str(),
+            a1freq,
+            vcnt.gcs[0] + vcnt.gcs[1] + vcnt.gcs[2],
+            vcnt.gcs[0],
+            vcnt.gcs[1],
+            vcnt.gcs[2]);
+        const std::vector<slr_sumstat_t>& var_results = rect_results[j];
+        for(int32_t k=0; k < (int32_t)input.pheno_matrix.pheno_ids.size(); ++k) {
+            const slr_sumstat_t& ss = var_results[k];
+            hprintf(wf, "\t%.6g\t%.6g\t%.6g\t%.6g",
+                ss.beta,
+                ss.se,
+                ss.tstat,
+                ss.log10p);
+        }
+        hprintf(wf, "\n");
+    }
+    hts_close(wf);
+
+    // ---- SuSiE fine-mapping (optional) --------------------------------------
+    // Fine-mapping reuses the same genotype chunk and covariate-adjusted phenotype
+    // matrix as the marginal association above, so the per-variant marginal BETA /
+    // LOG10P (from rect_results) are matched directly into the credible-set output.
+    if ( run_susie ) {
+        const int32_t n_pheno = (int32_t)input.pheno_matrix.pheno_ids.size();
+        const int32_t n_vars = input.geno_chunk.n_variants;
+        if ( n_vars == 0 ) {
+            notice("Skipping SuSiE: no variants loaded in the region");
+        }
+        else {
+            susie::SusieOptions sopt;
+            sopt.L = susie_L;
+            sopt.max_iter = susie_max_iter;
+            sopt.tol = susie_tol;
+            sopt.standardize = !susie_no_standardize;
+
+            // Unmappable-effects model. "inf" enables SuSiE-inf, which (like
+            // susieR) forces PIP-based convergence; also match susieR's default
+            // inf tolerance of 1e-4 when the user left --susie-tol at its default.
+            bool run_inf = false;
+            if ( unmappable_effects == "inf" ) {
+                sopt.unmappable_effects = susie::SusieOptions::INF;
+                sopt.convergence_method = susie::SusieOptions::PIP;
+                if ( susie_tol == 1e-3 ) sopt.tol = 1e-4;
+                run_inf = true;
+            }
+            else if ( unmappable_effects != "none" ) {
+                error("--unmappable-effects must be 'none' or 'inf' (got '%s'); 'ash' is not implemented", unmappable_effects.c_str());
+            }
+
+            // region label shared across all rows (CHR_BEG_END)
+            char region_buf[256];
+            snprintf(region_buf, sizeof(region_buf), "%s_%d_%d",
+                     region_cbe.chrom.c_str(), region_cbe.beg1, region_cbe.end0);
+            const std::string region_str(region_buf);
+
+            // credible-set output: one row per variant that belongs to a credible set
+            std::string cs_path = outf + susie_cs_suffix;
+            htsFile* wcs = hts_open(cs_path.c_str(), cs_path.substr(cs_path.length() - 3).compare(".gz") == 0 ? "wz" : "w");
+            if ( wcs == NULL )
+                error("Cannot open SuSiE credible-set output file %s", cs_path.c_str());
+            hprintf(wcs, "#trait\tvariant\tpip\tcs_id\talpha\tregion\tcs_size\tlbf\tmu\tmu2\taf\tn\tbeta\tse\tlog10p\n");
+
+            // optional per-variant LBF output: one row per variant, one column per single effect
+            const int32_t L_eff = std::max(1, std::min(susie_L, n_vars));
+            htsFile* wlbf = NULL;
+            std::string lbf_path;
+            if ( output_lbf ) {
+                lbf_path = outf + susie_lbf_suffix;
+                wlbf = hts_open(lbf_path.c_str(), lbf_path.substr(lbf_path.length() - 3).compare(".gz") == 0 ? "wz" : "w");
+                if ( wlbf == NULL )
+                    error("Cannot open SuSiE LBF output file %s", lbf_path.c_str());
+                hprintf(wlbf, "#trait\tvariant\tregion\taf\tpip");
+                // SuSiE-inf: report the per-variant infinitesimal effect posterior mean
+                if ( run_inf ) hprintf(wlbf, "\ttheta");
+                for(int32_t l = 0; l < L_eff; ++l) hprintf(wlbf, "\tlbf.L%d", l + 1);
+                hprintf(wlbf, "\n");
+            }
+
+            notice("Running SuSiE fine-mapping for %d phenotype(s) over %d variants", n_pheno, n_vars);
+            for(int32_t k = 0; k < n_pheno; ++k) {
+                const std::string& trait = input.pheno_matrix.pheno_ids[k];
+                Eigen::VectorXd y = input.pheno_matrix.pheno_mat.col(k);
+                susie::SusieResult res = susie::simple_susie_without_missing(
+                    y, input.geno_chunk.geno_mat, sopt, susie_coverage, susie_min_abs_corr);
+
+                if ( run_inf )
+                    notice("SuSiE-inf trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g, tau2=%.4g",
+                           trait.c_str(), (int)res.cs.size(), res.fit.niter,
+                           (int)res.fit.converged, res.fit.sigma2, res.fit.tau2);
+                else
+                    notice("SuSiE trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g",
+                           trait.c_str(), (int)res.cs.size(), res.fit.niter,
+                           (int)res.fit.converged, res.fit.sigma2);
+
+                // one row per variant in each credible set
+                for(int32_t c = 0; c < (int32_t)res.cs.size(); ++c) {
+                    const susie::CredibleSet& cs = res.cs[c];
+                    const int32_t l = cs.effect_index;      // single effect defining this CS
+                    const int32_t cs_id = c + 1;            // 1-based CS id within the trait
+                    const int32_t cs_size = (int32_t)cs.variables.size();
+                    for(int32_t m = 0; m < cs_size; ++m) {
+                        const int32_t j = cs.variables[m];
+                        const cpra_t& cpra = input.geno_chunk.v_cpra[j];
+                        const var_cnt_t& vcnt = input.geno_chunk.var_cnts[j];
+                        const slr_sumstat_t& ss = rect_results[j][k]; // marginal association
+                        const double af = (double)vcnt.ac / (double)vcnt.an;
+                        hprintf(wcs, "%s\t%s\t%.6g\t%d\t%.6g\t%s\t%d\t%.6g\t%.6g\t%.6g\t%.6g\t%d\t%.6g\t%.6g\t%.6g\n",
+                            trait.c_str(),
+                            cpra.to_string().c_str(),   // variant C:P:R:A
+                            res.fit.pip(j),             // marginal PIP
+                            cs_id,
+                            res.fit.alpha(l, j),        // posterior prob within this CS
+                            region_str.c_str(),
+                            cs_size,
+                            cs.lbf,                     // log Bayes factor of the CS
+                            res.fit.mu(l, j),           // posterior mean | inclusion
+                            res.fit.mu2(l, j),          // posterior 2nd moment | inclusion
+                            af,
+                            ss.n_obs,                   // sample size
+                            ss.beta,                    // marginal BETA
+                            ss.se,                      // marginal SE
+                            ss.log10p);                 // marginal LOG10P
+                    }
+                }
+
+                // per-variant LBF for every variant (optional)
+                if ( output_lbf ) {
+                    const int32_t Lrows = (int32_t)res.fit.lbf_variable.rows();
+                    for(int32_t j = 0; j < n_vars; ++j) {
+                        const cpra_t& cpra = input.geno_chunk.v_cpra[j];
+                        const var_cnt_t& vcnt = input.geno_chunk.var_cnts[j];
+                        const double af = (double)vcnt.ac / (double)vcnt.an;
+                        // marginal PIP = 1 - prod_l(1 - alpha_lj), reported for every
+                        // variant regardless of credible-set membership
+                        hprintf(wlbf, "%s\t%s\t%s\t%.6g\t%.6g", trait.c_str(), cpra.to_string().c_str(), region_str.c_str(), af, res.fit.pip(j));
+                        // SuSiE-inf infinitesimal effect posterior mean (standardized-X scale, like susieR fit$theta)
+                        if ( run_inf ) hprintf(wlbf, "\t%.6g", (j < (int32_t)res.fit.theta.size()) ? res.fit.theta(j) : 0.0);
+                        for(int32_t l = 0; l < L_eff; ++l) {
+                            const double v = (l < Lrows) ? res.fit.lbf_variable(l, j) : 0.0;
+                            hprintf(wlbf, "\t%.6g", v);
+                        }
+                        hprintf(wlbf, "\n");
+                    }
+                }
+            }
+            hts_close(wcs);
+            if ( wlbf ) hts_close(wlbf);
+            notice("SuSiE credible sets written to %s", cs_path.c_str());
+            if ( output_lbf ) notice("SuSiE per-variant LBF written to %s", lbf_path.c_str());
+        }
+    }
+
+    notice("Analysis finished. Total variants processed: %lld", (long long)input.geno_chunk.n_variants);
     return 0;
 }

@@ -6,6 +6,7 @@ int32_t test_qpgen(int32_t argc, char** argv);
 int32_t match_plp_geno(int32_t argc, char** argv);
 int32_t join_plp_geno(int32_t argc, char** argv);
 int32_t cmd_geno2tsv(int32_t argc, char** argv);
+int32_t cmd_pgen2tsv(int32_t argc, char** argv);
 int32_t cmd_pair_assoc(int32_t argc, char** argv);
 int32_t cmd_pair_assoc_v0(int32_t argc, char** argv);
 int32_t cmd_rect_assoc(int32_t argc, char** argv);
@@ -30,6 +31,7 @@ int32_t main(int32_t argc, char** argv) {
 
     LONG_COMMAND_GROUP("Utilities for genotype extraction", NULL)
     LONG_COMMAND("geno2tsv", &cmd_geno2tsv, "Extract genotypes into TSV format")
+    LONG_COMMAND("pgen2tsv", &cmd_pgen2tsv, "Extract PGEN genotypes (0/1/2 ALT coding) into TSV with AF/AC filters and sparse support")
 
     LONG_COMMAND_GROUP("Other Utilities", NULL)
     LONG_COMMAND("test-qpgen", &test_qpgen, "Test software to check the qpgen library")

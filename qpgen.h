@@ -224,12 +224,20 @@ protected:
     bool pivar_loaded;
     bool pgen_loaded;
     bool dosage_present; // true if dosage is present in the pgen file
+    bool mean_impute_dosage; // true: replace missing dosages with the variant mean
     plink_var_t cur_var;  // current variant information
     int32_t cur_var_idx;  // current variant index
     int32_t icol_pivar_idx; // column index for the variant ID in the pvar file (0-based)
 
+    // sparse representation of the current variant's hardcalls.
+    // cur_is_sparse == false means the variant was read densely; use int_buf.
+    bool cur_is_sparse;
+    int32_t sparse_common_geno;              // common genotype (0/1/2, or -9 if missing)
+    std::vector<int32_t> sparse_sample_idxs; // subset-local 0-based indices of non-common samples
+    std::vector<int32_t> sparse_genos;       // their genotype codes (0/1/2/-9), parallel to sparse_sample_idxs
+
 public:
-    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000), dosage_present(false) {}
+    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000), dosage_present(false), mean_impute_dosage(true), cur_is_sparse(false), sparse_common_geno(-9) {}
     ~PgenIdxReader() {
         if ( dbl_buf ) free(dbl_buf);
     }
@@ -244,8 +252,9 @@ public:
 
     bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL); // change the current variant position to a specific CPRA
-    bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position
-    bool compute_geno_stats();               // compute genotype counts and allele frequencies for the current variant
+    bool get_genos(int32_t var_idx = -1);   // read the genotypes at the current variant position (full int_buf/dbl_buf)
+    bool get_genos_sparse(int32_t var_idx = -1); // read genotypes, keeping the sparse representation when possible (no full int_buf expansion)
+    //bool compute_geno_stats();               // compute genotype counts and allele frequencies for the current variant
     bool load_psam(const char* _psamf);
     
     int32_t get_n_threads() const { return nthreads; }
@@ -264,6 +273,15 @@ public:
     bool is_pivar_loaded() const { return pivar_loaded; }
     bool is_pgen_loaded() const { return pgen_loaded; }
     bool is_dosage_present() const { return dosage_present; }
+    bool get_mean_impute_dosage() const { return mean_impute_dosage; }
+    void set_mean_impute_dosage(bool b) { mean_impute_dosage = b; }
+
+    // sparse representation of the most recently read variant (see get_genos_sparse)
+    bool is_sparse() const { return cur_is_sparse; }
+    int32_t get_sparse_common_geno() const { return sparse_common_geno; }
+    const std::vector<int32_t>& get_sparse_sample_idxs() const { return sparse_sample_idxs; }
+    const std::vector<int32_t>& get_sparse_genos() const { return sparse_genos; }
+
     const plink_var_t& get_current_variant() const { return cur_var; }
     int32_t get_current_variant_idx() const { return cur_var_idx; }
 
@@ -308,19 +326,35 @@ public:
 
     bool read_pos(const char* chrom, int32_t pos); // change the current variant position to a specific CPRA
     bool read_pivar(const char* cpra = NULL);      // change the current variant position to a specific CPRA
-    bool get_genos();                              // read the genotypes at the current variant position
-    bool compute_geno_stats();                     // compute genotype counts and allele frequencies for the current variant
-    
+    bool get_genos();                              // read the genotypes at the current variant position (full int_buf/dbl_buf)
+    bool get_genos_sparse();                       // read genotypes, keeping the sparse representation when possible
+    //bool compute_geno_stats();                     // compute genotype counts and allele frequencies for the current variant
+
     int32_t get_n_threads() const { return nthreads; }
     void set_n_threads(int32_t n);
 
     int32_t get_icol_pivar_idx() const { return icol_pivar_idx; }
     void set_icol_pivar_idx(int32_t idx);
 
+    // mean-imputation of missing dosages is on by default; propagate to readers
+    void set_mean_impute_dosage(bool b) {
+        for (int32_t i=0; i < p_readers.size(); ++i) {
+            p_readers[i]->set_mean_impute_dosage(b);
+        }
+    }
+
     const std::vector<int32_t>& get_int_buf() const { return int_buf; }
     const double* get_dbl_buf() const { return dbl_buf; }
 
     bool is_dosage_present() const { return dosage_present; }
+
+    // sparse representation of the most recently read variant (see get_genos_sparse),
+    // delegated to the currently active per-chunk reader
+    bool is_sparse() const { return idx_cur_reader >= 0 && p_readers[idx_cur_reader]->is_sparse(); }
+    int32_t get_sparse_common_geno() const { return p_readers[idx_cur_reader]->get_sparse_common_geno(); }
+    const std::vector<int32_t>& get_sparse_sample_idxs() const { return p_readers[idx_cur_reader]->get_sparse_sample_idxs(); }
+    const std::vector<int32_t>& get_sparse_genos() const { return p_readers[idx_cur_reader]->get_sparse_genos(); }
+
     const plink_var_t& get_current_variant() const;
 
     int32_t get_all_sample_count() const;

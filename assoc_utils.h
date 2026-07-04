@@ -14,15 +14,26 @@ public:
     Eigen::MatrixXd geno_mat; // genotype matrix (n_samples x n_variants)
     Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> geno_mask; // genotype missingness mask (n_samples x n_variants)
     std::vector<cpra_t> v_cpra; // vector of CPRA identifiers for the variants in the chunk
-    std::vector<double> acs; // allele counts for the variants in the chunk
-    std::vector<int32_t> ans; // allele numbers for the variants in the chunk
-    std::vector<int32_t> gc0s, gc1s, gc2s;
+    std::vector<var_cnt_t> var_cnts; // vector of variant counts for the variants in the chunk
     std::vector<double> infos;
     int32_t n_variants; // number of variants in the chunk
     int32_t n_skipped;
     int32_t n_samples; // number of samples in the chunk
+    uint64_t n_geno_missing; // number of missing genotypes in the chunk
 
-    genotype_chunk() : n_variants(0), n_skipped(0), n_samples(0) {}
+    void clear() {
+        geno_mat.resize(0, 0);
+        geno_mask.resize(0, 0);
+        v_cpra.clear();
+        infos.clear();
+        var_cnts.clear();
+        n_variants = 0;
+        n_skipped = 0;
+        n_samples = 0;
+        n_geno_missing = 0;
+    }
+
+    genotype_chunk() : n_variants(0), n_skipped(0), n_samples(0), n_geno_missing(0) {}
     ~genotype_chunk() {}
 };
 
@@ -119,7 +130,8 @@ public:
 
     bool process_pgenlist(const char* pgenlistf, const char* phef, const char* pheno_format, const char* covf, const char* cov_format);
     bool process_single_pgen(const char* pgenf, const char* pivarf, const char* psamf, const char* phef, const char* pheno_format, const char* covf, const char* cov_format);
-    bool load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars, Eigen::MatrixXd& geno_mat, Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask);
+    //int32_t load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars, Eigen::MatrixXd& geno_mat, Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask);
+    int32_t load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars);
 };
 
 Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);

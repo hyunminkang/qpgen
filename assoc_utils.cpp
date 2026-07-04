@@ -851,7 +851,11 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     if ( !pheno_matrix.load_pheno_matrix(phef, pheno_format) ) {
         error("Failed to load the phenotype matrix from file %s", phef);
     }
-
+    if ( subset_pheno_ids.size() > 0 ) {
+        notice("Subsetting the phenotype matrix to the specified phenotypes");
+        pheno_matrix.subset_pheno_ids(subset_pheno_ids);
+    }
+    
     notice("Loaded phenotype matrix with %d samples and %d phenotypes from %s", (int32_t)pheno_matrix.samp_ids.size(), (int32_t)pheno_matrix.pheno_ids.size(), phef);
 
     if ( covf != NULL && strlen(covf) > 0 ) {
@@ -1093,7 +1097,175 @@ bool ind_assoc_input::load_pgen_files(const char* pgenf, const char* pivarf, con
 //     }    
 // }
 
-bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars, Eigen::MatrixXd& geno_mat, Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask) {
+// int32_t ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars, Eigen::MatrixXd& geno_mat, Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& geno_mask) {
+//     // read genotype data from the pgen files
+//     notice("Loading genotype data from pgen files with chromosome %s, position %d to %d, and maximum chunk size of %d variants", chrom == NULL ? "NULL" : chrom, beg, end, max_chunk_vars);
+//     int32_t n_overlapping_samples = (int32_t)overlapping_sample_ids.size();
+//     if ( chrom != NULL ) { // start reading from a specific position
+//         geno_chunk_done = false;
+//         if ( !mpr.read_pos(chrom, beg) ) { // no variant at/after the requested start
+//             geno_chunk_done = true;
+//         }
+//         notice("Reading genotype data from %s:%d to %s:%d", chrom, beg, chrom, end);
+//     }
+//     else { // continue streaming from the current position left by the previous chunk
+//         notice("Reading genotype data from the current position to %s:%d", geno_chunk_done ? "(end)" : mpr.get_current_variant().schrom.c_str(), end);
+//     }
+
+//     if ( geno_chunk_done ) { // the region has already been fully streamed
+//         geno_mat.resize(n_overlapping_samples, 0);
+//         geno_mask.resize(n_overlapping_samples, 0);
+//         return false;
+//     }
+
+//     std::vector<cpra_t> v_cpra;
+//     std::vector<int32_t> ans;
+//     std::vector<double> acs;
+//     std::vector<int32_t> gc0s, gc1s, gc2s;
+//     std::vector<double> infos;
+//     const std::vector<int32_t>& int_buf = mpr.get_int_buf();
+//     const double* dbl_buf = mpr.get_dbl_buf();
+//     int32_t n_col_est = 10;
+//     geno_mat.resize(n_overlapping_samples, n_col_est);
+//     geno_mask.resize(n_overlapping_samples, n_col_est);
+//     uint32_t n_geno_missing = 0;
+//     int32_t icol = 0;
+//     int32_t nskip = 0;
+
+//     notice("Reading genotype data for %d overlapping samples", n_overlapping_samples);
+
+//     int32_t gcs[3] = {0, 0, 0};
+//     while ( true ) {
+//         const plink_var_t& var = mpr.get_current_variant();
+//         if ( var.pos > end ) { // moved past the requested region
+//             geno_chunk_done = true;
+//             break;
+//         }
+
+//         gcs[0] = gcs[1] = gcs[2] = 0; // initialize genotype counts
+//         std::string cpra_s(var.to_string());
+//         mpr.get_genos();
+
+//         if ( icol >= n_col_est ) {
+//             geno_mat.conservativeResize(n_overlapping_samples, n_col_est * 2);
+//             geno_mask.conservativeResize(n_overlapping_samples, n_col_est * 2);
+//             n_col_est *= 2;
+//         }
+//         int32_t an = 0;
+//         double ac = 0;
+//         bool skip  = false;
+//         if ( mpr.is_dosage_present() ) {
+//             if ( dbl_buf == NULL) {
+//                 dbl_buf = mpr.get_dbl_buf();
+//             }
+//             double sumsq = 0;
+//             for(int32_t i =0; i < n_overlapping_samples; ++i) {
+//                 double ds = 2.0 - dbl_buf[i];
+//                 geno_mat(i, icol) = ds;
+//                 geno_mask(i, icol) = true; // not missing
+//                 ac += ds;
+//                 an += 2;
+//                 ++gcs[(ds < 0.5) ? 0 : ( (ds < 1.5) ? 1 : 2 )];
+//                 sumsq += (ds * ds);
+//             }
+//             if ( ac == 0 || an == ac ) {
+//                 skip = true; // skip monomorphic variants
+//             }
+//             else if ( ac < min_ac || ac > max_ac || ac < min_af * an || ac > max_af * an ) {
+//                 skip = true; // skip variants outside the specified allele count/frequency range
+//             }
+//             else {
+//                 double info = ( sumsq / 2.0 * an - 4.0 * ac * ac ) / ( 2.0 * ac * ( an - ac ) );
+//                 infos.push_back(info);
+//             }
+//         }
+//         else {
+//             for(int32_t i = 0; i < n_overlapping_samples; ++i) {
+//                 switch(int_buf[i]) { // make sure to convert 1-based index to 0-based
+//                 case 0:
+//                     an += 2;
+//                     ac += 2;
+//                     ++gcs[2];
+//                     break;
+//                 case 1:
+//                     an += 2;
+//                     ++ac;
+//                     ++gcs[1];
+//                     break;
+//                 case 2:
+//                     an += 2;
+//                     ++gcs[0];
+//                     break;
+//                 }
+//             }
+//             if ( ac == 0 || an == ac ) {
+//                 skip = true; // skip monomorphic variants
+//             }
+//             else if ( ac < min_ac || ac > max_ac || ac < min_af * an || ac > max_af * an ) {
+//                 skip = true; // skip variants outside the specified allele count/frequency range
+//             }
+//             else {
+//                 double mean = (double)ac / (double)an * 2.0;
+//                 double info = ((4.0 * gcs[2] + gcs[1])/(an/2.0) - mean * mean) / (mean * (2.0 - mean) / 2.0);
+//                 infos.push_back(info);
+//                 for(int32_t i = 0; i < n_overlapping_samples; ++i) {
+//                     switch(int_buf[i]) {
+//                     case 0:
+//                         geno_mat(i, icol) = 2.0 - mean; // homalt
+//                         geno_mask(i, icol) = true; // not missing
+//                         break;
+//                     case 1:
+//                         geno_mat(i, icol) = 1.0 - mean; // het
+//                         geno_mask(i, icol) = true; // not missing
+//                         break;
+//                     case 2:
+//                         geno_mat(i, icol) = 0.0 - mean; // homref
+//                         geno_mask(i, icol) = true; // not missing
+//                         break;
+//                     default:
+//                         geno_mat(i, icol) = 0; // missing - mean imputation
+//                         geno_mask(i, icol) = false; // missing
+//                         ++n_geno_missing;
+//                         break;
+//                     }
+//                 }
+//             }
+//         }
+
+//         if ( !skip ) {
+//             v_cpra.push_back(cpra_t(cpra_s.c_str()));
+//             acs.push_back(ac);
+//             ans.push_back(an);
+//             gc0s.push_back(gcs[0]);
+//             gc1s.push_back(gcs[1]);
+//             gc2s.push_back(gcs[2]);
+//             ++icol;
+//         }
+//         else {
+//             ++nskip;
+//         }
+
+//         // advance to the next variant right away so the next chunk never re-reads this one
+//         if ( !mpr.read_pivar() ) {
+//             geno_chunk_done = true; // reached the end of available variants
+//             break;
+//         }
+
+//         if ( icol >= max_chunk_vars ) { // chunk is full; cur_var already points to the next variant
+//             break;
+//         }
+//     }
+
+//     // shrink to the number of variants actually loaded so callers never see garbage columns
+//     geno_mat.conservativeResize(n_overlapping_samples, icol);
+//     geno_mask.conservativeResize(n_overlapping_samples, icol);
+
+//     notice("Loaded %d variants in the current chunk until %s, skipped %d", icol, mpr.get_current_variant().to_string().c_str(), nskip);
+
+//     return icol;
+// }
+
+int32_t ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_t end, int32_t max_chunk_vars) {
     // read genotype data from the pgen files
     notice("Loading genotype data from pgen files with chromosome %s, position %d to %d, and maximum chunk size of %d variants", chrom == NULL ? "NULL" : chrom, beg, end, max_chunk_vars);
     int32_t n_overlapping_samples = (int32_t)overlapping_sample_ids.size();
@@ -1109,24 +1281,21 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
     }
 
     if ( geno_chunk_done ) { // the region has already been fully streamed
-        geno_mat.resize(n_overlapping_samples, 0);
-        geno_mask.resize(n_overlapping_samples, 0);
+        geno_chunk.geno_mat.resize(n_overlapping_samples, 0);
+        geno_chunk.geno_mask.resize(n_overlapping_samples, 0);
         return false;
     }
 
-    std::vector<cpra_t> v_cpra;
-    std::vector<int32_t> ans;
-    std::vector<double> acs;
-    std::vector<int32_t> gc0s, gc1s, gc2s;
-    std::vector<double> infos;
+    geno_chunk.clear();
     const std::vector<int32_t>& int_buf = mpr.get_int_buf();
     const double* dbl_buf = mpr.get_dbl_buf();
     int32_t n_col_est = 10;
-    geno_mat.resize(n_overlapping_samples, n_col_est);
-    geno_mask.resize(n_overlapping_samples, n_col_est);
-    uint32_t n_geno_missing = 0;
+    geno_chunk.geno_mat.resize(n_overlapping_samples, n_col_est);
+    geno_chunk.geno_mask.resize(n_overlapping_samples, n_col_est);
+    geno_chunk.n_geno_missing = 0;
+
+    geno_chunk.n_samples = n_overlapping_samples;
     int32_t icol = 0;
-    int32_t nskip = 0;
 
     notice("Reading genotype data for %d overlapping samples", n_overlapping_samples);
 
@@ -1143,8 +1312,8 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
         mpr.get_genos();
 
         if ( icol >= n_col_est ) {
-            geno_mat.conservativeResize(n_overlapping_samples, n_col_est * 2);
-            geno_mask.conservativeResize(n_overlapping_samples, n_col_est * 2);
+            geno_chunk.geno_mat.conservativeResize(n_overlapping_samples, n_col_est * 2);
+            geno_chunk.geno_mask.conservativeResize(n_overlapping_samples, n_col_est * 2);
             n_col_est *= 2;
         }
         int32_t an = 0;
@@ -1157,8 +1326,8 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
             double sumsq = 0;
             for(int32_t i =0; i < n_overlapping_samples; ++i) {
                 double ds = 2.0 - dbl_buf[i];
-                geno_mat(i, icol) = ds;
-                geno_mask(i, icol) = true; // not missing
+                geno_chunk.geno_mat(i, icol) = ds;
+                geno_chunk.geno_mask(i, icol) = true; // not missing
                 ac += ds;
                 an += 2;
                 ++gcs[(ds < 0.5) ? 0 : ( (ds < 1.5) ? 1 : 2 )];
@@ -1172,7 +1341,7 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
             }
             else {
                 double info = ( sumsq / 2.0 * an - 4.0 * ac * ac ) / ( 2.0 * ac * ( an - ac ) );
-                infos.push_back(info);
+                geno_chunk.infos.push_back(info);
             }
         }
         else {
@@ -1203,25 +1372,25 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
             else {
                 double mean = (double)ac / (double)an * 2.0;
                 double info = ((4.0 * gcs[2] + gcs[1])/(an/2.0) - mean * mean) / (mean * (2.0 - mean) / 2.0);
-                infos.push_back(info);
+                geno_chunk.infos.push_back(info);
                 for(int32_t i = 0; i < n_overlapping_samples; ++i) {
                     switch(int_buf[i]) {
                     case 0:
-                        geno_mat(i, icol) = 2.0 - mean; // homalt
-                        geno_mask(i, icol) = true; // not missing
+                        geno_chunk.geno_mat(i, icol) = 2.0 - mean; // homalt
+                        geno_chunk.geno_mask(i, icol) = true; // not missing
                         break;
                     case 1:
-                        geno_mat(i, icol) = 1.0 - mean; // het
-                        geno_mask(i, icol) = true; // not missing
+                        geno_chunk.geno_mat(i, icol) = 1.0 - mean; // het
+                        geno_chunk.geno_mask(i, icol) = true; // not missing
                         break;
                     case 2:
-                        geno_mat(i, icol) = 0.0 - mean; // homref
-                        geno_mask(i, icol) = true; // not missing
+                        geno_chunk.geno_mat(i, icol) = 0.0 - mean; // homref
+                        geno_chunk.geno_mask(i, icol) = true; // not missing
                         break;
                     default:
-                        geno_mat(i, icol) = 0; // missing - mean imputation
-                        geno_mask(i, icol) = false; // missing
-                        ++n_geno_missing;
+                        geno_chunk.geno_mat(i, icol) = 0; // missing - mean imputation
+                        geno_chunk.geno_mask(i, icol) = false; // missing
+                        ++geno_chunk.n_geno_missing;
                         break;
                     }
                 }
@@ -1229,16 +1398,18 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
         }
 
         if ( !skip ) {
-            v_cpra.push_back(cpra_t(cpra_s.c_str()));
-            acs.push_back(ac);
-            ans.push_back(an);
-            gc0s.push_back(gcs[0]);
-            gc1s.push_back(gcs[1]);
-            gc2s.push_back(gcs[2]);
+            geno_chunk.v_cpra.push_back(cpra_t(cpra_s.c_str())); 
+            geno_chunk.var_cnts.push_back(var_cnt_t(an, ac, gcs[0], gcs[1], gcs[2]));
+            // geno_chunk.acs.push_back(ac);
+            // geno_chunk.ans.push_back(an);
+            // geno_chunk.gc0s.push_back(gcs[0]);
+            // geno_chunk.gc1s.push_back(gcs[1]);
+            // geno_chunk.gc2s.push_back(gcs[2]);
             ++icol;
         }
         else {
-            ++nskip;
+            //++nskip;
+            ++geno_chunk.n_skipped;
         }
 
         // advance to the next variant right away so the next chunk never re-reads this one
@@ -1253,10 +1424,28 @@ bool ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int32_
     }
 
     // shrink to the number of variants actually loaded so callers never see garbage columns
-    geno_mat.conservativeResize(n_overlapping_samples, icol);
-    geno_mask.conservativeResize(n_overlapping_samples, icol);
+    geno_chunk.geno_mat.conservativeResize(n_overlapping_samples, icol);
+    geno_chunk.geno_mask.conservativeResize(n_overlapping_samples, icol);
 
-    notice("Loaded %d variants in the current chunk until %s, skipped %d", icol, mpr.get_current_variant().to_string().c_str(), nskip);
+    // Residualize the genotypes against the same covariates used to adjust the
+    // phenotype. The phenotype matrix is covariate-adjusted in load_pheno_cov_matrices(),
+    // so for the association test (and SuSiE) to estimate the *partial* effect of each
+    // variant, the genotypes must be projected onto the orthogonal complement of the
+    // covariate space as well (Frisch-Waugh-Lovell). Adjusting only the phenotype leaves
+    // genotype variance that is collinear with the covariates (e.g. genotype PCs) in the
+    // design, which inflates x'x, attenuates the correlation with the phenotype, and thus
+    // shrinks beta and the test statistic. This mirrors susieR usage where both X and y
+    // are residualized against the covariates before fitting.
+    if ( icol > 0 && cov_matrix.pheno_mat.cols() > 0 ) {
+        if ( cov_matrix.pheno_mat.rows() != n_overlapping_samples ) {
+            error("Covariate matrix has %d rows but %d overlapping samples were expected",
+                  (int32_t)cov_matrix.pheno_mat.rows(), n_overlapping_samples);
+        }
+        geno_chunk.geno_mat = pheno_adj_cov_nxt_without_missing(geno_chunk.geno_mat, cov_matrix.pheno_mat);
+    }
 
-    return ( icol > 0 );
+    notice("Loaded %d variants in the current chunk until %s, skipped %d", icol, mpr.get_current_variant().to_string().c_str(), geno_chunk.n_skipped);
+
+    geno_chunk.n_variants = icol;
+    return icol;
 }
