@@ -403,6 +403,348 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
 }
 
 // ---------------------------------------------------------------------------
+// SuSiE-ash (simplified port of SuSiE 2.0's unmappable_effects="ash").
+//
+// Model: y = sum_l X b_l + X theta + e,  e ~ N(0, sigma2 I),
+//        theta_j ~ sum_k pi_k * N(0, sigma2 * sa2_k)      (sa2_0 = 0 = null)
+//
+// Per the SuSiE 2.0 paper (McCreight et al. 2025, Algorithm 1) the SER updates
+// are performed under the Omega-weighted marginal likelihood, identical to the
+// SuSiE-inf machinery, and tau2 = sigma2 * sum_k pi_k * sa2_k so the mixture
+// prior implicitly defines Omega = (tau2 * X X' + sigma2 * I)^{-1}. Concretely,
+// each outer iteration:
+//   1. SER (Omega-weighted using cached omega_var / X'Omega y / diag(X'Omega X))
+//   2. Provisional (sigma2, tau2) via MoM (2x2 solve, same as SuSiE-inf)
+//   3. sa2 grid built from tau2/sigma2 so it spans plausible polygenic scales
+//   4. Mr.ASH inner loop: coordinate-ascent NM updates for theta_j given the
+//      residual r_theta_j = y - X*b_bar - X*theta + x_j*theta_j (primal scale)
+//   5. pi = mean of gamma columns; tau2 = sigma2 * sum(pi * sa2)
+//   6. Refresh Omega cache
+// PIP-based convergence, matching susieR's ash path.
+//
+// Simplifications relative to susieR 0.16.5: no p x p LD matrix, no 3-tier
+// masking layer, no Beta-Binomial slot-activity. These add ~440 R lines of
+// stateful state that the paper says are for "elevated FDR under polygenic
+// backgrounds" but are not required for the core algorithm.
+// ---------------------------------------------------------------------------
+
+// One sweep of Mr.ASH coordinate ascent. Updates theta, theta2 (E[theta_j^2]),
+// and gamma (p x K responsibilities); r is updated incrementally so that at
+// every point r = y - X*b_bar - X*theta. Returns max |delta theta_j|.
+static double mr_ash_sweep(const MatrixXd& X, VectorXd& r,
+                           VectorXd& theta, VectorXd& theta2, MatrixXd& gamma,
+                           const ArrayXd& xtx, double sigma2,
+                           const ArrayXd& sa2, const ArrayXd& log_pi) {
+    const int p = (int)X.cols();
+    const int K = (int)sa2.size();
+    double max_delta = 0.0;
+    for (int j = 0; j < p; ++j) {
+        double xtx_j = xtx(j);
+        if (!std::isfinite(xtx_j) || xtx_j <= 0.0) continue;
+
+        double theta_old = theta(j);
+        // partial residual: r_theta_j = r + x_j * theta_j_old
+        r += theta_old * X.col(j);
+
+        double xtr = X.col(j).dot(r);
+        double bhat = xtr / xtx_j;
+
+        // per-component NM stats on prior N(0, sigma2 * sa2_k):
+        //   pvar_k  = sigma2 * sa2_k / (1 + sa2_k * xtx_j)
+        //   pmean_k = (pvar_k / shat2) * bhat   with shat2 = sigma2 / xtx_j
+        //   lbf_k   = -0.5*log(1 + sa2_k*xtx_j) + 0.5*bhat^2*sa2_k*xtx_j /
+        //             (sigma2 * (1 + sa2_k*xtx_j))
+        double m_max = -std::numeric_limits<double>::infinity();
+        std::vector<double> logw(K), pmean(K), pvar(K);
+        for (int k = 0; k < K; ++k) {
+            double sk = sa2(k);
+            if (sk <= 0.0) {
+                pvar[k] = 0.0; pmean[k] = 0.0;
+                logw[k] = log_pi(k);
+            } else {
+                double denom = 1.0 + sk * xtx_j;
+                pvar[k]  = sigma2 * sk / denom;
+                pmean[k] = sk * xtx_j / denom * bhat;    // == (pvar_k / shat2) * bhat
+                double lbf = -0.5 * std::log(denom)
+                           + 0.5 * bhat * bhat * sk * xtx_j / (sigma2 * denom);
+                logw[k] = log_pi(k) + lbf;
+            }
+            if (logw[k] > m_max) m_max = logw[k];
+        }
+        double s = 0.0;
+        std::vector<double> w(K);
+        for (int k = 0; k < K; ++k) { w[k] = std::exp(logw[k] - m_max); s += w[k]; }
+        double inv_s = 1.0 / s;
+
+        double theta_new = 0.0, theta2_new = 0.0;
+        for (int k = 0; k < K; ++k) {
+            double gk = w[k] * inv_s;
+            gamma(j, k) = gk;
+            theta_new  += gk * pmean[k];
+            theta2_new += gk * (pvar[k] + pmean[k] * pmean[k]);
+        }
+        theta(j)  = theta_new;
+        theta2(j) = theta2_new;
+        r -= theta_new * X.col(j);
+
+        double d = std::abs(theta_new - theta_old);
+        if (d > max_delta) max_delta = d;
+    }
+    return max_delta;
+}
+
+// Solve the SuSiE-inf 2x2 MoM system for (sigma2, tau2) and return the
+// non-negative pair (or (x1/n, 0) when the system is not proper).
+static void mom_variance_components(
+    int n, double yty, const VectorXd& b, const VectorXd& Xty,
+    const VectorXd& eigval, const VectorXd& Vtb_all, const VectorXd& VtXty,
+    const ArrayXd& diagVtMV, double var_y_floor,
+    double& sigma2, double& tau2) {
+    const double sumEv  = eigval.sum();
+    const double sumEv2 = eigval.array().square().sum();
+    Eigen::Matrix2d A;
+    A << (double)n, sumEv, sumEv, sumEv2;
+    double x1 = yty - 2.0 * b.dot(Xty) + (eigval.array() * diagVtMV).sum();
+    double x2 = Xty.squaredNorm()
+                - 2.0 * (Vtb_all.array() * VtXty.array() * eigval.array()).sum()
+                + (eigval.array().square() * diagVtMV).sum();
+    Eigen::Vector2d sol = A.colPivHouseholderQr().solve(Eigen::Vector2d(x1, x2));
+    if (sol(0) > 0.0 && sol(1) > 0.0) { sigma2 = sol(0); tau2 = sol(1); }
+    else                              { sigma2 = std::max(x1 / n, var_y_floor); tau2 = 0.0; }
+}
+
+SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt) {
+    const int n = (int)X.rows();
+    const int p = (int)X.cols();
+    const int L = std::max(1, std::min(opt.L, p));
+    const bool fix_pi = !opt.ash_fix_pi.empty();
+    const int K = fix_pi ? (int)opt.ash_fix_pi.size() : std::max(2, opt.ash_K);
+    const double var_y = y.squaredNorm() / std::max(1, n - 1);
+
+    // --- thin eigendecomposition of standardized X (same as fit_susie_inf) ---
+    MatrixXd G = X * X.transpose();
+    Eigen::SelfAdjointEigenSolver<MatrixXd> es(G);
+    const VectorXd& evals = es.eigenvalues();
+    const MatrixXd& U_all = es.eigenvectors();
+    const double ev_tol = std::max(evals.maxCoeff(), 0.0) * 1e-8;
+    std::vector<int> keep;
+    for (int k = 0; k < n; ++k) if (evals(k) > ev_tol) keep.push_back(k);
+    const int r_rank = (int)keep.size();
+
+    VectorXd eigval(r_rank);
+    MatrixXd Vmat(p, r_rank);
+    VectorXd VtXty(r_rank);
+    for (int idx = 0; idx < r_rank; ++idx) {
+        const int k = keep[idx];
+        const double ev = evals(k);
+        const double dk = std::sqrt(ev);
+        VectorXd uk = U_all.col(k);
+        eigval(idx)  = ev;
+        Vmat.col(idx) = (X.transpose() * uk) / dk;
+        VtXty(idx)   = dk * uk.dot(y);
+    }
+    MatrixXd Vsq = Vmat.array().square();
+    VectorXd Xty = X.transpose() * y;
+    const double yty = y.squaredNorm();
+    ArrayXd logpi_ser = ArrayXd::Constant(p, -std::log((double)p));
+    ArrayXd xtx = X.array().square().colwise().sum();
+    for (int j = 0; j < p; ++j) if (xtx(j) <= 0.0) xtx(j) = std::numeric_limits<double>::infinity();
+
+    // --- SER state ---
+    MatrixXd alpha = MatrixXd::Constant(L, p, 1.0 / p);
+    MatrixXd mu    = MatrixXd::Zero(L, p);
+    MatrixXd mu2   = MatrixXd::Zero(L, p);
+    MatrixXd lbf_variable = MatrixXd::Zero(L, p);
+    VectorXd lbf   = VectorXd::Zero(L);
+    VectorXd V     = VectorXd::Constant(L, opt.scaled_prior_variance * var_y);
+    double sigma2  = var_y;
+    double tau2    = 0.0;
+
+    // --- Mr.ASH state ---
+    // Grid: sa2_0 = 0 (null); non-null components log-spaced. The scale of the
+    // grid is rebuilt each outer iteration from the MoM tau2/sigma2 so it stays
+    // matched to the polygenic magnitude the data actually implies.
+    ArrayXd sa2 = ArrayXd::Zero(K);
+    const bool fix_sa2 = !opt.ash_fix_sa2.empty();
+    if (fix_sa2) {
+        // If not co-set with fix_pi, K falls back to ash_K; caller must ensure
+        // ash_fix_sa2.size() == K. Silently clip to min length otherwise.
+        int nsa2 = (int)opt.ash_fix_sa2.size();
+        for (int k = 0; k < K && k < nsa2; ++k) sa2(k) = opt.ash_fix_sa2[k];
+    } else {
+        double sa2_max = 1.0;                       // initial guess ~ N(0,sigma2)
+        double sa2_min = sa2_max * 1e-3;
+        double lo = std::log(sa2_min), hi = std::log(sa2_max);
+        sa2(0) = 0.0;
+        for (int k = 1; k < K; ++k)
+            sa2(k) = std::exp(lo + (hi - lo) * (double)(k - 1) / (double)std::max(1, K - 2));
+    }
+    ArrayXd mix_pi = ArrayXd::Constant(K, 1.0 / (double)K);
+    if (fix_pi) {
+        for (int k = 0; k < K; ++k) mix_pi(k) = opt.ash_fix_pi[k];
+        double s = mix_pi.sum();
+        if (s > 0.0) mix_pi /= s;
+    } else {
+        // Init pi with the null component dominant so ash does not absorb signal
+        // before SER has had a chance to fine-map it.
+        mix_pi(0) = 0.9; for (int k = 1; k < K; ++k) mix_pi(k) = 0.1 / (double)(K - 1);
+    }
+    ArrayXd log_pi_arr = mix_pi.max(1e-300).log();
+
+    VectorXd theta  = VectorXd::Zero(p);
+    VectorXd theta2 = VectorXd::Zero(p);
+    MatrixXd gamma  = MatrixXd::Zero(p, K); gamma.col(0).setOnes();
+
+    // Omega caches (theta enters through Omega, not by subtracting X*theta from y).
+    ArrayXd omega_var = tau2 * eigval.array() + sigma2;
+    VectorXd pw = Vsq * (eigval.array() / omega_var).matrix();
+    VectorXd XtOmegay = Vmat * (VtXty.array() / omega_var).matrix();
+
+    // maintained primal residual for the Mr.ASH inner loop: r = y - X*b_bar - X*theta
+    VectorXd b_bar = VectorXd::Zero(p);
+    VectorXd r_primal = y;
+
+    MatrixXd alpha_prev = alpha;
+    VectorXd pip_prev   = VectorXd::Zero(p);
+    SusieFit fit; fit.converged = false; fit.niter = 0;
+
+    for (int iter = 0; iter < opt.max_iter; ++iter) {
+        // ---- Step 1: Omega-weighted single-effect regressions ----
+        for (int l = 0; l < L; ++l) {
+            VectorXd b_full  = (alpha.array() * mu.array()).colwise().sum().transpose();
+            VectorXd b_l     = (alpha.row(l).array() * mu.row(l).array()).matrix().transpose();
+            VectorXd b_minus = b_full - b_l;
+            VectorXd Vtb     = Vmat.transpose() * b_minus;
+            VectorXd XtOmegaXb = Vmat * (Vtb.array() * eigval.array() / omega_var).matrix();
+            ArrayXd res = (XtOmegay - XtOmegaXb).array();
+
+            double Vl = susie_inf_optimize_V(pw.array(), res, logpi_ser, V(l));
+            V(l) = Vl;
+            if (Vl <= 0.0) {
+                alpha.row(l).setConstant(1.0 / p);
+                mu.row(l).setZero();
+                mu2.row(l).setZero();
+                lbf_variable.row(l).setZero();
+                lbf(l) = 0.0;
+                continue;
+            }
+            ArrayXd denom = 1.0 + Vl * pw.array();
+            ArrayXd lbfj  = -0.5 * denom.log() + 0.5 * Vl * res.square() / denom;
+            ArrayXd w = lbfj + logpi_ser;
+            double m = w.maxCoeff();
+            ArrayXd a = (w - m).exp();
+            double s = a.sum();
+            a /= s;
+            ArrayXd post_var = Vl / denom;
+            ArrayXd post_mean = post_var * res;
+            alpha.row(l) = a.transpose();
+            mu.row(l)    = post_mean.transpose();
+            mu2.row(l)   = (post_var + post_mean.square()).transpose();
+            lbf_variable.row(l) = lbfj.transpose();
+            lbf(l) = m + std::log(s);
+        }
+        fit.niter = iter + 1;
+
+        // ---- PIP-based convergence ----
+        VectorXd pip(p);
+        for (int j = 0; j < p; ++j) {
+            double prod = 1.0;
+            for (int l = 0; l < L; ++l) prod *= (1.0 - alpha(l, j));
+            pip(j) = 1.0 - prod;
+        }
+        if (iter > 0) {
+            double da = (alpha - alpha_prev).cwiseAbs().maxCoeff();
+            double dp = (pip - pip_prev).cwiseAbs().maxCoeff();
+            if (std::max(da, dp) < opt.tol) { fit.converged = true; break; }
+        }
+        alpha_prev = alpha;
+        pip_prev   = pip;
+
+        // ---- Step 2: provisional (sigma2, tau2) via MoM, same 2x2 as SuSiE-inf ----
+        VectorXd b = (alpha.array() * mu.array()).colwise().sum().transpose();
+        VectorXd Vtb_all = Vmat.transpose() * b;
+        ArrayXd diagVtMV = Vtb_all.array().square();
+        ArrayXd tmpD = ArrayXd::Zero(p);
+        for (int l = 0; l < L; ++l) {
+            VectorXd bl   = (alpha.row(l).array() * mu.row(l).array()).matrix().transpose();
+            VectorXd Vtbl = Vmat.transpose() * bl;
+            diagVtMV -= Vtbl.array().square();
+            ArrayXd omega_l = pw.array() + 1.0 / V(l);
+            tmpD += alpha.row(l).transpose().array() *
+                    (mu.row(l).transpose().array().square() + 1.0 / omega_l);
+        }
+        diagVtMV += (Vsq.transpose() * tmpD.matrix()).array();
+
+        double sigma2_prov = sigma2, tau2_prov = tau2;
+        mom_variance_components(n, yty, b, Xty, eigval, Vtb_all, VtXty, diagVtMV,
+                                 var_y * 1e-8, sigma2_prov, tau2_prov);
+        if (opt.estimate_residual_variance && sigma2_prov > 0.0) sigma2 = sigma2_prov;
+
+        // ---- Step 3: build a data-driven sa2 grid based on tau2_prov/sigma2 ----
+        // Interpret tau2 as an average variance sigma2*E[sa2]; set sa2_max so a
+        // few non-null components cover several times this magnitude, and
+        // sa2_min three orders of magnitude below, log-spaced.
+        // Skip grid rebuild when pi or sa2 is fixed (reduction tests want a pinned grid).
+        if (!fix_pi && !fix_sa2) {
+            double ratio = (sigma2 > 0.0) ? std::max(tau2_prov / sigma2, 1e-8) : 1e-4;
+            double sa2_max = std::max(4.0 * ratio, 1e-3);
+            double sa2_min = std::max(sa2_max * 1e-3, 1e-8);
+            double lo = std::log(sa2_min), hi = std::log(sa2_max);
+            sa2(0) = 0.0;
+            for (int k = 1; k < K; ++k)
+                sa2(k) = std::exp(lo + (hi - lo) * (double)(k - 1) / (double)std::max(1, K - 2));
+        }
+
+        // ---- Step 4: Mr.ASH inner loop for theta ----
+        // Sync r_primal to the fresh b_bar before sweeping.
+        VectorXd b_bar_new = b;
+        r_primal += X * (b_bar - b_bar_new);          // undo old b_bar, apply new
+        b_bar = b_bar_new;
+        // r_primal now = y - X*b_bar - X*theta_old.
+
+        double inner_tol = std::max(opt.ash_inner_tol, opt.tol);
+        for (int inner = 0; inner < opt.ash_inner_max; ++inner) {
+            double d = mr_ash_sweep(X, r_primal, theta, theta2, gamma,
+                                     xtx, sigma2, sa2, log_pi_arr);
+            if (d < inner_tol) break;
+        }
+
+        // ---- Step 5: EM update of pi = mean of gamma columns, tau2 = sigma2 * sum(pi*sa2) ----
+        if (!fix_pi) {
+            Eigen::RowVectorXd cm = gamma.colwise().mean();
+            mix_pi = cm.array().transpose();
+            mix_pi = mix_pi.max(1e-8);
+            mix_pi /= mix_pi.sum();
+            log_pi_arr = mix_pi.log();
+        }
+        tau2 = sigma2 * (mix_pi * sa2).sum();
+
+        // ---- Step 6: refresh Omega cache ----
+        omega_var = tau2 * eigval.array() + sigma2;
+        pw        = Vsq * (eigval.array() / omega_var).matrix();
+        XtOmegay  = Vmat * (VtXty.array() / omega_var).matrix();
+    }
+
+    VectorXd pip(p);
+    for (int j = 0; j < p; ++j) {
+        double prod = 1.0;
+        for (int l = 0; l < L; ++l) prod *= (1.0 - alpha(l, j));
+        pip(j) = 1.0 - prod;
+    }
+
+    VectorXd b_final = (alpha.array() * mu.array()).colwise().sum().transpose();
+    VectorXd Xr = X * (b_final + theta);
+    fit.alpha = alpha; fit.mu = mu; fit.mu2 = mu2;
+    fit.lbf_variable = lbf_variable; fit.lbf = lbf;
+    fit.pip = pip; fit.Xr = Xr; fit.fitted = Xr;
+    fit.V = V; fit.sigma2 = sigma2; fit.intercept = 0.0;
+    fit.tau2 = tau2; fit.theta = theta;
+    fit.ash_sa2 = sa2.matrix();
+    fit.ash_pi  = mix_pi.matrix();
+    return fit;
+}
+
+// ---------------------------------------------------------------------------
 // Credible sets
 // ---------------------------------------------------------------------------
 
@@ -520,9 +862,12 @@ SusieResult simple_susie_without_missing(const VectorXd& pheno_vec,
     }
 
     SusieResult res;
-    res.fit = (opt.unmappable_effects == SusieOptions::INF)
-                  ? fit_susie_inf(X, y, opt)
-                  : fit_susie(X, y, opt);
+    if (opt.unmappable_effects == SusieOptions::INF)
+        res.fit = fit_susie_inf(X, y, opt);
+    else if (opt.unmappable_effects == SusieOptions::ASH)
+        res.fit = fit_susie_ash(X, y, opt);
+    else
+        res.fit = fit_susie(X, y, opt);
     res.cs = susie_get_cs(res.fit, X, coverage, min_abs_corr);
     return res;
 }

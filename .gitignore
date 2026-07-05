@@ -53,3 +53,7 @@ site/
 site/*
 .vscode/
 .vscode/*
+.claude/
+.claude/*
+tmp/
+tmp/*

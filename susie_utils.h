@@ -36,12 +36,16 @@ struct SusieFit {
     std::vector<double> elbo; // objective at each outer iteration
     int      niter;
     bool     converged;
-    // SuSiE-inf (unmappable infinitesimal effects) extras. tau2 is the
-    // infinitesimal variance component and theta the p-vector of posterior mean
-    // infinitesimal effects (on the standardized-X scale, like susieR's fit$theta).
-    // For standard SuSiE tau2 == 0 and theta is empty.
+    // SuSiE-inf / SuSiE-ash (unmappable effects) extras.
+    //   tau2   : infinitesimal variance (inf); or sum(pi_k*sa2_k)*sigma2 (ash, for reporting)
+    //   theta  : p-vector of posterior mean unmappable effects (standardized-X scale)
+    //   ash_sa2: K component prior variances on the sa2 grid (ash only; empty otherwise)
+    //   ash_pi : K mixture weights (ash only; sum to 1, first entry is null component)
+    // For standard SuSiE and inf, ash_sa2/ash_pi are empty and theta may be empty.
     double   tau2 = 0.0;
     VectorXd theta;
+    VectorXd ash_sa2;
+    VectorXd ash_pi;
 };
 
 struct SusieOptions {
@@ -55,11 +59,28 @@ struct SusieOptions {
     double prior_v_max  = 1e3;
     bool   standardize  = true;           // scale X columns to unit variance (a copy)
     enum ConvergenceMethod { ELBO, PIP } convergence_method = ELBO;
-    // Unmappable-effects model. NONE = standard SuSiE. INF = SuSiE-inf, which adds
-    // an infinitesimal (polygenic) random effect X*theta, theta_j ~ N(0, tau2),
-    // matching susieR's unmappable_effects = "inf" (MoM variance components,
-    // PIP-based convergence). ASH is intentionally not implemented.
-    enum UnmappableEffects { NONE, INF } unmappable_effects = NONE;
+    // Unmappable-effects model.
+    //   NONE : standard SuSiE.
+    //   INF  : SuSiE-inf; theta_j ~ N(0, tau2) with MoM variance components.
+    //   ASH  : SuSiE-ash; theta_j ~ sum_k pi_k * N(0, sa2_k * sigma2) with a fixed
+    //          log-spaced grid (Mr.ASH-style). Simplified port that skips the
+    //          LD-masking heuristics and slot-activity model to keep it fast.
+    enum UnmappableEffects { NONE, INF, ASH } unmappable_effects = NONE;
+    // ASH-only knobs (ignored otherwise).
+    int    ash_K            = 10;        // number of prior-variance grid components (incl. null)
+    double ash_sd_mult      = 2.0;       // successive sa2 components are sd_mult^2 x apart
+    int    ash_inner_max    = 200;       // max coord-ascent sweeps per outer iter
+    double ash_inner_tol    = 1e-3;      // loose inner tolerance; auto-tightened near outer conv.
+    // Reduction-test hook: fix pi to a specific vector and skip EM updates.
+    //   empty -> normal ash (EM-updated pi).
+    //   length K vector -> pi held at these values throughout; used to prove
+    //     ash reduces to standard SuSiE when pi=(1,0,...,0), and to SuSiE-inf
+    //     when pi has all mass on a single non-null grid component.
+    std::vector<double> ash_fix_pi;
+    // Reduction-test hook: fix the sa2 grid and skip the data-driven rebuild.
+    //   empty -> data-driven grid (see fit_susie_ash step 3).
+    //   length matching ash_fix_pi -> sa2 grid held at these values.
+    std::vector<double> ash_fix_sa2;
 };
 
 // A 95% (or requested coverage) credible set for a single effect.
@@ -83,6 +104,13 @@ SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt
 // the eigenspace (thin SVD / Gram) Omega = (tau2 XX' + sigma2 I)^{-1} formulation,
 // estimating (sigma2, tau2) by method of moments and theta as its BLUP.
 SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt = SusieOptions());
+
+// Fit SuSiE-ash (simplified port of susieR unmappable_effects = "ash"). theta_j
+// has a scale-mixture-of-normals prior sum_k pi_k * N(0, sa2_k * sigma2) fit by
+// Mr.ASH coordinate ascent. The grid is fixed and log-spaced (first component
+// is the null point mass); pi and sigma2 are estimated by EM. Skips susieR's
+// LD-masking and slot-activity heuristics for speed.
+SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt = SusieOptions());
 
 // Extract credible sets from a fit. X_std must be the (standardized) design matrix
 // actually used by fit_susie, so correlations/purity are computed consistently.

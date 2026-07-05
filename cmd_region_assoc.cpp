@@ -58,6 +58,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     bool susie_no_standardize = false;
     bool output_lbf = false; // also write per-variant log Bayes factors
     std::string unmappable_effects = "none"; // "none" (standard SuSiE) or "inf" (SuSiE-inf)
+    std::string ash_fix_pi_str;              // reduction-test: comma-separated pi values
+    std::string ash_fix_sa2_str;             // reduction-test: comma-separated sa2 values
 
     // suffix for the output files
     std::string assoc_suffix = ".assoc.tsv.gz";
@@ -113,6 +115,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_DOUBLE_PARAM("susie-tol", &susie_tol, "Convergence tolerance for the SuSiE objective (default: 1e-3)")
     LONG_PARAM("susie-no-standardize", &susie_no_standardize, "Do not standardize genotype columns to unit variance before SuSiE")
     LONG_STRING_PARAM("unmappable-effects", &unmappable_effects, "Unmappable-effects model for SuSiE: 'none' (standard) or 'inf' (SuSiE-inf, adds an infinitesimal effect). Matches run_susie_v1.r --method (default: none)")
+    LONG_STRING_PARAM("ash-fix-pi", &ash_fix_pi_str, "Reduction test: comma-separated pi vector to hold ash mixture weights fixed (skips EM). Length K. Used with --unmappable-effects ash to prove ash reduces to none (pi=1,0,...,0) or inf (pi=0,...,0,1).")
+    LONG_STRING_PARAM("ash-fix-sa2", &ash_fix_sa2_str, "Reduction test: comma-separated sa2 grid to hold ash prior-variance grid fixed. Length must match --ash-fix-pi.")
     LONG_PARAM("output-lbf", &output_lbf, "Also write per-variant log Bayes factors (one column per single effect) when running SuSiE")
     END_LONG_PARAMS();
 
@@ -252,19 +256,48 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             sopt.tol = susie_tol;
             sopt.standardize = !susie_no_standardize;
 
-            // Unmappable-effects model. "inf" enables SuSiE-inf, which (like
-            // susieR) forces PIP-based convergence; also match susieR's default
-            // inf tolerance of 1e-4 when the user left --susie-tol at its default.
+            // Unmappable-effects model. "inf"/"ash" force PIP-based convergence
+            // (they have no well-defined ELBO). Match susieR's default inf/ash
+            // tolerance of 1e-4 when the user left --susie-tol at its default.
             bool run_inf = false;
+            bool run_ash = false;
             if ( unmappable_effects == "inf" ) {
                 sopt.unmappable_effects = susie::SusieOptions::INF;
                 sopt.convergence_method = susie::SusieOptions::PIP;
                 if ( susie_tol == 1e-3 ) sopt.tol = 1e-4;
                 run_inf = true;
             }
-            else if ( unmappable_effects != "none" ) {
-                error("--unmappable-effects must be 'none' or 'inf' (got '%s'); 'ash' is not implemented", unmappable_effects.c_str());
+            else if ( unmappable_effects == "ash" ) {
+                sopt.unmappable_effects = susie::SusieOptions::ASH;
+                sopt.convergence_method = susie::SusieOptions::PIP;
+                if ( susie_tol == 1e-3 ) sopt.tol = 1e-4;
+                run_ash = true;
+                // Reduction-test hooks: --ash-fix-pi / --ash-fix-sa2.
+                auto parse_csv = [](const std::string& s) {
+                    std::vector<double> out;
+                    size_t i = 0;
+                    while (i < s.size()) {
+                        size_t j = s.find(',', i);
+                        std::string tok = s.substr(i, j == std::string::npos ? std::string::npos : j - i);
+                        if (!tok.empty()) out.push_back(atof(tok.c_str()));
+                        if (j == std::string::npos) break;
+                        i = j + 1;
+                    }
+                    return out;
+                };
+                if ( !ash_fix_pi_str.empty() ) sopt.ash_fix_pi = parse_csv(ash_fix_pi_str);
+                if ( !ash_fix_sa2_str.empty() ) sopt.ash_fix_sa2 = parse_csv(ash_fix_sa2_str);
+                if ( !sopt.ash_fix_pi.empty() && !sopt.ash_fix_sa2.empty() &&
+                     sopt.ash_fix_pi.size() != sopt.ash_fix_sa2.size() ) {
+                    error("--ash-fix-pi (K=%d) and --ash-fix-sa2 (K=%d) must have the same length",
+                          (int)sopt.ash_fix_pi.size(), (int)sopt.ash_fix_sa2.size());
+                }
+                if ( !sopt.ash_fix_pi.empty() ) sopt.ash_K = (int)sopt.ash_fix_pi.size();
             }
+            else if ( unmappable_effects != "none" ) {
+                error("--unmappable-effects must be 'none', 'inf', or 'ash' (got '%s')", unmappable_effects.c_str());
+            }
+            const bool has_theta = run_inf || run_ash;
 
             // region label shared across all rows (CHR_BEG_END)
             char region_buf[256];
@@ -289,8 +322,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                 if ( wlbf == NULL )
                     error("Cannot open SuSiE LBF output file %s", lbf_path.c_str());
                 hprintf(wlbf, "#trait\tvariant\tregion\taf\tpip");
-                // SuSiE-inf: report the per-variant infinitesimal effect posterior mean
-                if ( run_inf ) hprintf(wlbf, "\ttheta");
+                // inf/ash: report per-variant unmappable-effect posterior mean
+                if ( has_theta ) hprintf(wlbf, "\ttheta");
                 for(int32_t l = 0; l < L_eff; ++l) hprintf(wlbf, "\tlbf.L%d", l + 1);
                 hprintf(wlbf, "\n");
             }
@@ -302,13 +335,14 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                 susie::SusieResult res = susie::simple_susie_without_missing(
                     y, input.geno_chunk.geno_mat, sopt, susie_coverage, susie_min_abs_corr);
 
-                if ( run_inf )
-                    notice("SuSiE-inf trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g, tau2=%.4g",
-                           trait.c_str(), (int)res.cs.size(), res.fit.niter,
+                const char* tag = run_ash ? "SuSiE-ash" : (run_inf ? "SuSiE-inf" : "SuSiE");
+                if ( has_theta )
+                    notice("%s trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g, tau2=%.4g",
+                           tag, trait.c_str(), (int)res.cs.size(), res.fit.niter,
                            (int)res.fit.converged, res.fit.sigma2, res.fit.tau2);
                 else
-                    notice("SuSiE trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g",
-                           trait.c_str(), (int)res.cs.size(), res.fit.niter,
+                    notice("%s trait %s: %d credible set(s), niter=%d, converged=%d, sigma2=%.4g",
+                           tag, trait.c_str(), (int)res.cs.size(), res.fit.niter,
                            (int)res.fit.converged, res.fit.sigma2);
 
                 // one row per variant in each credible set
@@ -352,8 +386,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                         // marginal PIP = 1 - prod_l(1 - alpha_lj), reported for every
                         // variant regardless of credible-set membership
                         hprintf(wlbf, "%s\t%s\t%s\t%.6g\t%.6g", trait.c_str(), cpra.to_string().c_str(), region_str.c_str(), af, res.fit.pip(j));
-                        // SuSiE-inf infinitesimal effect posterior mean (standardized-X scale, like susieR fit$theta)
-                        if ( run_inf ) hprintf(wlbf, "\t%.6g", (j < (int32_t)res.fit.theta.size()) ? res.fit.theta(j) : 0.0);
+                        // inf/ash: unmappable-effect posterior mean (standardized-X scale, like susieR fit$theta)
+                        if ( has_theta ) hprintf(wlbf, "\t%.6g", (j < (int32_t)res.fit.theta.size()) ? res.fit.theta(j) : 0.0);
                         for(int32_t l = 0; l < L_eff; ++l) {
                             const double v = (l < Lrows) ? res.fit.lbf_variable(l, j) : 0.0;
                             hprintf(wlbf, "\t%.6g", v);
