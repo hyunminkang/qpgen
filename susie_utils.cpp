@@ -1,9 +1,11 @@
 #include "susie_utils.h"
+#include "qgenlib/qgen_error.h"
 #include <cmath>
 #include <limits>
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <string>
 
 namespace susie {
 
@@ -103,9 +105,29 @@ SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt
     const int L = std::max(1, std::min(opt.L, p));
 
     ArrayXd xtx = X.array().square().colwise().sum();
-    // guard against exactly-zero columns (monomorphic) to avoid divide-by-zero
-    for (int j = 0; j < p; ++j) if (xtx(j) <= 0.0) xtx(j) = std::numeric_limits<double>::infinity();
-    ArrayXd logpi = ArrayXd::Constant(p, -std::log((double)p));
+    // Columns with no variance (monomorphic, or fully explained by the covariates
+    // after the Frisch-Waugh-Lovell residualization) carry no information. They must
+    // be given zero prior weight rather than merely a guarded x'x: dividing by a
+    // sentinel x'x yields betahat2/s2 = 0/0 = NaN, and because every variable shares
+    // the same softmax and residual, a single NaN propagates to the whole fit
+    // (all-NaN alpha/lbf, sigma2 frozen at its initial value, no credible sets).
+    int n_active = 0;
+    for (int j = 0; j < p; ++j) {
+        if (std::isfinite(xtx(j)) && xtx(j) > 0.0) ++n_active;
+    }
+    if (n_active == 0) {
+        error("fit_susie(): all %d genotype columns have zero variance; nothing to fine-map", p);
+    }
+    ArrayXd logpi(p);
+    const double logpi_active = -std::log((double)n_active);
+    for (int j = 0; j < p; ++j) {
+        if (std::isfinite(xtx(j)) && xtx(j) > 0.0) {
+            logpi(j) = logpi_active;
+        } else {
+            xtx(j)   = 1.0;                                        // keep the arithmetic finite
+            logpi(j) = -std::numeric_limits<double>::infinity();    // prior weight 0 -> alpha 0
+        }
+    }
     double var_y = (y.array() - y.mean()).square().sum() / std::max(1, n);
 
     MatrixXd alpha = MatrixXd::Zero(L, p);
@@ -153,7 +175,7 @@ SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt
             ArrayXd m2 = mu2.row(l).array();
             erss += (xtx * (a * m2)).sum();
         }
-        if (opt.estimate_residual_variance && erss > 0.0) sigma2 = erss / n;
+        if (opt.estimate_residual_variance && std::isfinite(erss) && erss > 0.0) sigma2 = erss / n;
 
         double elbo = -0.5 * n * std::log(2.0 * M_PI * sigma2) - erss / (2.0 * sigma2);
         for (int l = 0; l < L; ++l) elbo += lbf(l);
@@ -847,18 +869,49 @@ SusieResult simple_susie_without_missing(const VectorXd& pheno_vec,
 
     // center the phenotype (covariates already regressed out by the caller)
     VectorXd y = pheno_vec.array() - pheno_vec.mean();
+    if (!y.allFinite())
+        error("simple_susie_without_missing(): the phenotype vector contains non-finite values");
 
-    // work on a standardized copy of X so the caller's matrix is left untouched
+    // Work on a standardized copy of X so the caller's matrix is left untouched.
+    //
+    // Every single-effect regression shares one residual and one softmax across all p
+    // variables, so a single bad column contaminates the entire fit rather than just
+    // its own coefficient (unlike the marginal per-variant regressions, which stay
+    // correct for every other variant). Two kinds of bad column are screened here:
+    //   - non-finite entries (e.g. a NaN dosage that survived mean-imputation);
+    //   - zero variance (monomorphic in the analyzed samples, an imputed variant with
+    //     an identical dosage for everybody, or a variant fully explained by the
+    //     covariates after the FWL residualization).
+    // Both are zeroed out and reported; fit_susie() then gives them zero prior weight
+    // so their PIP/alpha are 0 and the remaining variants are fit normally.
     MatrixXd X = geno_mat;
+    int n_nonfinite_cols = 0, n_novar_cols = 0;
+    std::vector<int> bad_cols;
     for (int j = 0; j < p; ++j) {
-        double mean = X.col(j).mean();
-        double ss = (X.col(j).array() - mean).square().sum();
-        double sd = std::sqrt(ss / std::max(1, n - 1));
-        if (opt.standardize && sd > 0.0) {
-            X.col(j) = (X.col(j).array() - mean) / sd;
-        } else {
-            X.col(j) = X.col(j).array() - mean; // at least center
+        bool finite = X.col(j).allFinite();
+        double mean = finite ? X.col(j).mean() : 0.0;
+        double ss   = finite ? (X.col(j).array() - mean).square().sum() : 0.0;
+        double sd   = std::sqrt(ss / std::max(1, n - 1));
+        if (!finite || !(ss > 0.0) || !(sd > 0.0)) {
+            if (!finite) ++n_nonfinite_cols; else ++n_novar_cols;
+            if ((int)bad_cols.size() < 10) bad_cols.push_back(j);
+            X.col(j).setZero();
+            continue;
         }
+        if (opt.standardize) X.col(j) = (X.col(j).array() - mean) / sd;
+        else                 X.col(j) = X.col(j).array() - mean; // at least center
+    }
+    if (n_nonfinite_cols + n_novar_cols > 0) {
+        std::string idx;
+        for (size_t i = 0; i < bad_cols.size(); ++i) {
+            if (i) idx += ",";
+            idx += std::to_string(bad_cols[i]);
+        }
+        if ((int)bad_cols.size() < n_nonfinite_cols + n_novar_cols) idx += ",...";
+        notice("SuSiE: excluding %d of %d variants with no usable genotype variance "
+               "(%d with non-finite values, %d monomorphic/collinear-with-covariates); "
+               "0-based column indices: %s",
+               n_nonfinite_cols + n_novar_cols, p, n_nonfinite_cols, n_novar_cols, idx.c_str());
     }
 
     SusieResult res;

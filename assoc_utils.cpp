@@ -1444,6 +1444,7 @@ int32_t ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int
         geno_chunk.geno_mat = pheno_adj_cov_nxt_without_missing(geno_chunk.geno_mat, cov_matrix.pheno_mat);
     }
 
+
     notice("Loaded %d variants in the current chunk until %s, skipped %d", icol, mpr.get_current_variant().to_string().c_str(), geno_chunk.n_skipped);
 
     geno_chunk.n_variants = icol;
