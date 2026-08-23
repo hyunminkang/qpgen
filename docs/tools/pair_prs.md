@@ -2,12 +2,14 @@
 
 ## Summary 
 
-`qpgentools pair-prs` performs rapid association tests between selected variant-trait pairs.
+`qpgentools pair-prs` rapidly computes polygenic risk scores (PRS) for every sample, from
+per-trait summary statistics given as `[trait_id] [variant_id] [beta] [se]` tuples. One score is
+produced per (sample, trait) pair, together with its standard error.
 
 A typical running example command is given below:
 
 ```bash
-qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pairs] --out [out_prefix]
+qpgentools pair-prs --pgen-list [list] --pairs [pairs] --out [out_prefix]
 ```
 
 ## Required options
@@ -31,8 +33,8 @@ qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pa
 
 The following two files are expected to be generated:
 
-* `[out_prefix].prs.tsv.gz` : PRS values for each sample
-* `[out_prefix].se.tsv.gz` : Standard errors for each sample
+* `[out_prefix].prs.tsv.gz` : PRS values for each sample. Regenie-style layout: `FID`, `IID`, followed by one column per trait.
+* `[out_prefix].se.tsv.gz` : Standard errors of the PRS values, in the same layout. Written only when standard errors are available from the `--pairs` file.
 
 ## Full Usage 
 

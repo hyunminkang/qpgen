@@ -1,8 +1,21 @@
 # Installing qpgen
 
+## Requirements
+
+* A C++14-capable compiler with OpenMP support (`cmake` configures with `find_package(OpenMP REQUIRED)`).
+    * On macOS, the Apple Clang shipped with Xcode does not include OpenMP; install it with `brew install libomp`.
+* [cmake](https://cmake.org/) (2.8 or later)
+* Standard compression libraries used by `htslib` : `zlib`, `bzip2`, `lzma`, and (optionally) `libcurl`, `libdeflate`, `libcrypto`
+* `bgzip` and `tabix` (from [htslib](https://github.com/samtools/htslib)) are needed to build the
+  indexed pvar files described in [Genotype file formats](formats/genotypes.md).
+
+`qpgentools` bundles [htslib](https://github.com/samtools/htslib),
+[qgenlib](https://github.com/hyunminkang/qgenlib), and [Eigen](https://gitlab.com/libeigen/eigen)
+as git submodules, so all three are built from within the repository.
+
 ## Installing qpgen
 
-`qpgentools` contains `htslib` and `qgenlib` as submodules, so you need to clone the repository recursively to install the required libraries, and build the submodules before building the `qpgen` package. An example instruction is given below.
+Because `htslib`, `qgenlib`, and `eigen` are submodules, you need to clone the repository recursively, and build the submodules before building the `qpgen` package. An example instruction is given below.
 
 ```sh
 ## STEP 1 : CLONE THE REPOSITORY
@@ -19,10 +32,10 @@ cd submodules
 ## build the submodules using build.sh script
 sh -x build.sh
 
-## move to the spatula directory
+## move back to the qpgen directory
 cd ..
 
-## STEP 3 : BUILD SPATULA
+## STEP 3 : BUILD QPGENTOOLS
 ## create a build directory
 mkdir build
 cd build
@@ -30,11 +43,20 @@ cd build
 ## Run cmake to configure the build
 cmake ..
 
-## Build the spatula package
+## Build the qpgentools package
 make
 ```
 
+If you cloned the repository without `--recursive`, run `git submodule update --init --recursive`
+before STEP 2. `cmake` fails with `Eigen submodule missing` when the `submodules/eigen` directory
+has not been populated.
+
 If `cmake` is not found, you need to install [cmake](https://cmake.org/) in your system.
+
+The build produces two artifacts:
+
+* `bin/qpgentools` : the command line executable
+* `lib/libqpgen.a` : the static library
 
 ## (Optional) Customized specification of the library path
 
@@ -42,8 +64,8 @@ In case any required libraries is missing in `cmake`, you may specify customized
 
 ```sh
 ## If qgenlib is missing or installed in a different directory
-$ cmake -DQGEN_INCLUDE_DIRS=/qgenlib_absolute_path/include
-        -DHTS_LIBRARIES=/qgenlib_absolute_path/lib/libqgen.a ..
+$ cmake -DQGEN_INCLUDE_DIRS=/qgenlib_absolute_path/include \
+        -DQGEN_LIBRARIES=/qgenlib_absolute_path/lib/libqgen.a ..
 
 ## If htslib is missing or installed in a different directory
 $ cmake -DHTS_INCLUDE_DIRS=/htslib_absolute_path/include/  \

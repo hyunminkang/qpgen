@@ -27,10 +27,13 @@ qpgentools match-prs-pheno --prs [prs_matrix] --pheno [pheno_matrix] --out [out_
 * `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'.
 * `--rint` : Perform rank-based inverse normal transformation on phenotypes after covariate adjustment (default: false).
 * `--mahalanobis` : Use Mahalanobis distance for matching, which accounts for correlations between traits (default: false).
-* `--lambda` : Regularization parameter for Mahalanobis distance (default: 0.0).
-* `--min-weight` : Minimum weight (correlation) per trait to include in the analysis (default: 0.0).
+* `--weight-prs-mh` : Weight given to the PRS covariance when the PRS and phenotype covariances are blended into the Mahalanobis metric, as `w * COV_prs + (1 - w) * COV_pheno` (default: 0.5). Only used with `--mahalanobis`.
+* `--ledoit-wolf` : Estimate the shrinkage intensity for the covariance matrix by Ledoit-Wolf shrinkage instead of using a fixed `--lambda` (default: false). Requires `--lambda 0`; combining a non-zero `--lambda` with `--ledoit-wolf` is an error. Only used with `--mahalanobis`.
+* `--lambda` : Fixed shrinkage parameter for the Mahalanobis covariance, applied as `(1 - lambda) * COV + lambda * I`. Must be between 0 and 1 (default: 0.0). Only used with `--mahalanobis`.
+* `--min-weight` : Minimum weight (correlation) per trait to include in the analysis; traits below this are given zero weight (default: 0.0).
 * `--z-threshold` : Z-score threshold for declaring a lenient match (default: 1.96).
 * `--z-diff` : Z-score difference between the best and second-best match to declare a clear match (default: 2.0).
+* `--threads` : Number of threads used by Eigen for the matrix operations (default: 1).
 
 ## Expected Output
 
@@ -47,7 +50,7 @@ The following files are expected to be generated:
         * `COR.self`: Weighted correlation with itself.
         * `Rank.self`: Rank of the self-match among all PRS samples.
 * `[out_prefix].match.all.tsv.gz` : Detailed output including the top 5 matches for each phenotype sample.
-    * Columns: `ID.Pheno`, `MatchStatus`, `ID.self`, `Z.self`, `COR.self`, `Rank.self` followed by `ID`, `Z`, and `COR` for the 1st through 5th best matches.
+    * Columns: `ID.Pheno`, `MatchStatus`, `ID.self`, `Z.self`, `COR.self`, `Rank.self`, followed by `ID.1st`, `Z.1st`, `COR.1st` through `ID.5th`, `Z.5th`, `COR.5th` for the five best-matching PRS samples.
 
 ## Full Usage 
 
@@ -65,27 +68,29 @@ Detailed instructions of parameters are available. Ones with "[]" are in effect:
 Available Options:
 
 == Input Options ==
-   --prs          [STR: ]             : Input PRS file
-   --pheno        [STR: ]             : Input phenotype matrix
-   --cov          [STR: ]             : Input covariate matrix (optional)
-   --sample-tsv   [STR: ]             : TSV file containing input sample IDs PRS and phenotype files in [PRS_SAMPLE_ID] [PHENO_SAMPLE_ID] format. If they use the same IDs, use only a single column if subsetting samples are needed
-   --trait-tsv    [STR: ]             : TSV file containing input trait IDs PRS and phenotype files in [PRS_TRAIT_ID] [PHENO_TRAIT_ID] format. If they use the same IDs, use only a single column if subsetting traits are needed
-   --weights      [STR: ]             : Input weights file for each phenotype in [PHENO_ID] [WEIGHT] format
-   --prs-format   [STR: regenie]      : Format of the PRS file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
-   --pheno-format [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
-   --cov-format   [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
+   --prs           [STR: ]             : Input PRS file
+   --pheno         [STR: ]             : Input phenotype matrix
+   --cov           [STR: ]             : Input covariate matrix (optional)
+   --sample-tsv    [STR: ]             : TSV file containing input sample IDs PRS and phenotype files in [PRS_SAMPLE_ID] [PHENO_SAMPLE_ID] format. If they use the same IDs, use only a single column if subsetting samples are needed
+   --trait-tsv     [STR: ]             : TSV file containing input trait IDs PRS and phenotype files in [PRS_TRAIT_ID] [PHENO_TRAIT_ID] format. If they use the same IDs, use only a single column if subsetting traits are needed
+   --weights       [STR: ]             : Input weights file for each phenotype in [PHENO_ID] [WEIGHT] format
+   --prs-format    [STR: regenie]      : Format of the PRS file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
+   --pheno-format  [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
+   --cov-format    [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
 
 == Output options ==
-   --out          [STR: ]             : Output prefix
+   --out           [STR: ]             : Output prefix
 
 == Analysis options ==
-   --rint         [FLG: OFF]          : Perform rank-based inverse normal transformation after covariate adjustment (default: false)
-   --mahalanobis  [FLG: OFF]          : Use Mahalanobis distance for matching (default: false)
-   --lambda       [FLT: 0.00]         : Regularization parameter for Mahalanobis distance (default: 0.0)
-   --min-weight   [FLT: 0.00]         : Minimum weight (in r) per trait to set to zero (default: 0.0)
-   --z-threshold  [FLT: 1.96]         : Z-score threshold for lenient matching (default: 1.96)
-   --z-diff       [FLT: 2.00]         : Z-score difference to declare a clear match (default: 2.0)
-   --threads      [INT: 1]            : Number of threads to use (default: 1)
+   --rint          [FLG: OFF]          : Perform rank-based inverse normal transformation after covariate adjustment (default: false)
+   --mahalanobis   [FLG: OFF]          : Use Mahalanobis distance for matching (default: false)
+   --ledoit-wolf   [FLG: OFF]          : Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance (default: false)
+   --weight-prs-mh [FLT: 0.50]         : Weight for PRS distance when combining with weighted correlation (default: 0.5)
+   --lambda        [FLT: 0.00]         : Regularization parameter for Mahalanobis distance, between 0 and 1 (default: 0.0)
+   --min-weight    [FLT: 0.00]         : Minimum weight (in r) per trait to set to zero (default: 0.0)
+   --z-threshold   [FLT: 1.96]         : Z-score threshold for lenient matching (default: 1.96)
+   --z-diff        [FLT: 2.00]         : Z-score difference to declare a clear match (default: 2.0)
+   --threads       [INT: 1]            : Number of threads to use (default: 1)
 
 
 NOTES:
