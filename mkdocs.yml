@@ -80,10 +80,12 @@ nav:
     - pair-assoc: tools/pair_assoc.md
     - pair-prs: tools/pair_prs.md
     - rect-assoc: tools/rect_assoc.md
+    - region-assoc: tools/region_assoc.md
     - match-prs-pheno: tools/match_prs_pheno.md
     - match-plp-geno: tools/match_plp_geno.md
     - join-plp-geno: tools/join_plp_geno.md
     - geno2tsv: tools/geno2tsv.md
+    - pgen2tsv: tools/pgen2tsv.md
   
 markdown_extensions:
   - admonition
@@ -122,9 +124,7 @@ markdown_extensions:
   #     user: squidfunk
   #     repo: mkdocs-material
   - pymdownx.smartsymbols
-  - pymdownx.snippets:
-      auto_append:
-        - includes/mkdocs.md
+  - pymdownx.snippets
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
