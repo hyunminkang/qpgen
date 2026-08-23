@@ -36,7 +36,7 @@
 #include <stdlib.h>
 #include <memory>
 #include "pvar_ffi_support.h"
-#include "pgenlib_ffi_support.h"
+#include "include/pgenlib_ffi_support.h"
 #include "include/pgenlib_read.h"
 
 
@@ -66,6 +66,23 @@ public:
 
   void Read(double* buf, size_t const& n, int const& thr, int variant_idx, int allele_idx);
 
+  // Same as Read(), but missing dosages are replaced with the variant's mean
+  // dosage (mean-imputation) instead of a negative missing marker.
+  void ReadMeanimpute(double* buf, size_t const& n, int const& thr, int variant_idx, int allele_idx);
+
+  // Reads hardcalls, opportunistically using the .pgen's sparse (difflist)
+  // representation. If the variant is stored sparsely (at most
+  // raw_sample_ct/kPglMaxDifflistLenDivisor non-common genotypes), returns true
+  // and fills:
+  //   common_geno_out : the common genotype value (0/1/2, or -9 if missing)
+  //   sample_ids      : subset-local 0-based indices of the non-common samples
+  //   genos           : their genotype codes (0/1/2/-9), parallel to sample_ids
+  // Otherwise returns false and fills dense_buf with the full int hardcalls.
+  // Allele coding matches ReadIntHardcalls(..., allele_idx=0).
+  bool ReadMaybeSparseHardcalls(int const& thr, int variant_idx, int32_t* common_geno_out,
+                                std::vector<int>& sample_ids, std::vector<int>& genos,
+                                std::vector<int>& dense_buf);
+
   void Close();
 
   ~PgenReader();
@@ -84,6 +101,11 @@ private:
   std::vector<uint32_t*> _subset_cumulative_popcounts;
   std::vector<uint32_t> _subset_size;
   std::vector<uintptr_t*> _subset_include_vec;
+
+  // per-thread scratch buffers for sparse (difflist) hardcall reads
+  std::vector<uintptr_t*> _raregeno_buf;
+  std::vector<uint32_t*> _difflist_sample_ids_buf;
+  uint32_t _max_difflist_len; // max difflist length returned as sparse
 
   /*
   // kPglNypTransposeBatch (= 256) variants at a time, and then transpose

@@ -33,8 +33,9 @@
 
 PgenReader::PgenReader() : _info_ptr(nullptr),
                              //_allele_idx_offsetsp(nullptr),
-                             _nonref_flagsp(nullptr)
-                             //_state_ptr(nullptr) 
+                             _nonref_flagsp(nullptr),
+                             //_state_ptr(nullptr)
+                             _max_difflist_len(0)
                              {
 }
 
@@ -135,10 +136,18 @@ void PgenReader::Load(std::string filename, uint32_t cur_sample_ct, std::vector<
   }
   const uintptr_t dosage_main_byte_ct = plink2::DivUp(file_sample_ct, (2 * plink2::kInt32PerVec)) * plink2::kBytesPerVec;
 
+  // Buffers for sparse (difflist) hardcall reads. A variant stored as a difflist
+  // has at most file_sample_ct / kPglMaxDifflistLenDivisor non-common genotypes.
+  _max_difflist_len = file_sample_ct / plink2::kPglMaxDifflistLenDivisor;
+  const uintptr_t raregeno_byte_ct = plink2::DivUp(2 * _max_difflist_len + 1, plink2::kNypsPerVec) * plink2::kBytesPerVec;
+  const uintptr_t difflist_sample_ids_byte_ct = plink2::RoundUpPow2((3 * _max_difflist_len + 1) * sizeof(int32_t), plink2::kBytesPerVec);
+  _raregeno_buf.resize(nthr);
+  _difflist_sample_ids_buf.resize(nthr);
+
 
   for(int i = 0; i < nthr; i++) {
     unsigned char* pgr_alloc;
-    if (plink2::cachealigned_malloc(pgr_alloc_main_byte_ct + (2 * plink2::kPglNypTransposeBatch + 5) * sample_subset_byte_ct + cumulative_popcounts_byte_ct + (1 + plink2::kPglNypTransposeBatch) * genovec_byte_ct + multiallelic_hc_byte_ct + dosage_main_byte_ct + plink2::kPglBitTransposeBufbytes + 4 * (plink2::kPglNypTransposeBatch * plink2::kPglNypTransposeBatch / 8), &pgr_alloc)) {
+    if (plink2::cachealigned_malloc(pgr_alloc_main_byte_ct + (2 * plink2::kPglNypTransposeBatch + 5) * sample_subset_byte_ct + cumulative_popcounts_byte_ct + (1 + plink2::kPglNypTransposeBatch) * genovec_byte_ct + multiallelic_hc_byte_ct + dosage_main_byte_ct + raregeno_byte_ct + difflist_sample_ids_byte_ct + plink2::kPglBitTransposeBufbytes + 4 * (plink2::kPglNypTransposeBatch * plink2::kPglNypTransposeBatch / 8), &pgr_alloc)) {
       fprintf(stderr,"Out of memory");
       exit(-1);
     }
@@ -197,6 +206,12 @@ void PgenReader::Load(std::string filename, uint32_t cur_sample_ct, std::vector<
     pgr_alloc_iter = &(pgr_alloc_iter[sample_subset_byte_ct]);
     _pgv[i]->dosage_main = reinterpret_cast<uint16_t*>(pgr_alloc_iter);
     pgr_alloc_iter = &(pgr_alloc_iter[dosage_main_byte_ct]);
+
+    // sparse (difflist) read scratch buffers, carved from the same allocation
+    _raregeno_buf[i] = reinterpret_cast<uintptr_t*>(pgr_alloc_iter);
+    pgr_alloc_iter = &(pgr_alloc_iter[raregeno_byte_ct]);
+    _difflist_sample_ids_buf[i] = reinterpret_cast<uint32_t*>(pgr_alloc_iter);
+    pgr_alloc_iter = &(pgr_alloc_iter[difflist_sample_ids_byte_ct]);
 
 
     if (sample_subset_1based.size() > 0) {
@@ -348,6 +363,42 @@ void PgenReader::Read(double* buf, size_t const& n, int const& thr, int variant_
   plink2::Dosage16ToDoubles(kGenoRDoublePairs, _pgv[thr]->genovec, _pgv[thr]->dosage_present, _pgv[thr]->dosage_main, _subset_size[thr], dosage_ct, buf);
 }
 
+void PgenReader::ReadMeanimpute(double* buf, size_t const& n, int const& thr, int variant_idx, int allele_idx) {
+  if (!_info_ptr) {
+    fprintf(stderr,"pgen is closed");
+    exit(-1);
+  }
+  if (static_cast<uint32_t>(variant_idx) >= _info_ptr->raw_variant_ct) {
+    char errstr_buf[256];
+    snprintf(errstr_buf, 256, "variant_num out of range (%d; must be 1..%u)", variant_idx + 1, _info_ptr->raw_variant_ct);
+    fprintf(stderr,"%s\n", errstr_buf);
+    exit(-1);
+  }
+  if (n != _subset_size[thr]) {
+    char errstr_buf[256];
+    snprintf(errstr_buf, 256, "buf has wrong length (%" PRIdPTR "; %u expected)", n, _subset_size[thr]);
+    fprintf(stderr,"%s\n", errstr_buf);
+    exit(-1);
+  }
+  uint32_t dosage_ct;
+  plink2::PglErr reterr = PgrGet1D(_subset_include_vec[thr], _subset_index[thr], _subset_size[thr], variant_idx, allele_idx, _state_ptr[thr], _pgv[thr]->genovec, _pgv[thr]->dosage_present, _pgv[thr]->dosage_main, &dosage_ct);
+  if (reterr != plink2::kPglRetSuccess) {
+    char errstr_buf[256];
+    snprintf(errstr_buf, 256, "PgrGet1D() error %d", static_cast<int>(reterr));
+    fprintf(stderr,"%s\n", errstr_buf);
+    exit(-1);
+  }
+  // Dosage16ToDoublesMeanimpute requires trailing bits of genovec to be zeroed.
+  plink2::ZeroTrailingNyps(_subset_size[thr], _pgv[thr]->genovec);
+  if (plink2::Dosage16ToDoublesMeanimpute(_pgv[thr]->genovec, _pgv[thr]->dosage_present, _pgv[thr]->dosage_main, _subset_size[thr], dosage_ct, buf)) {
+    // Every sample is missing; nothing to impute from. Fill with 0.0 so that
+    // downstream monomorphic-variant filters skip it cleanly.
+    for (size_t i = 0; i < n; ++i) {
+      buf[i] = 0.0;
+    }
+  }
+}
+
 void PgenReader::Close() {
   // don't bother propagating file close errors for now
   if (_info_ptr) {
@@ -444,5 +495,61 @@ void PgenReader::ReadIntHardcalls(std::vector<int>& buf, int const& thr, int var
     exit(-1);
   }
   plink2::GenoarrLookup256x4bx4(_pgv[thr]->genovec, kGenoRInt32Quads, _subset_size[thr], buf.data() );
+}
+
+// PgrGetDifflistOrGenovec() returns the raw genovec coding (0 = hom-ref, i.e. ALT
+// dosage), whereas ReadIntHardcalls(..., allele_idx=0) returns the REF-allele
+// count (hom-ref -> 2). To keep ReadMaybeSparseHardcalls() byte-identical to the
+// existing dense reader, we map the raw genotype codes through this flipped table
+// (and flip the common genotype the same way: 0->2, 1->1, 2->0, missing->-9).
+static const int32_t kGenoRInt32QuadsFlipped[1024] ALIGNV16 = QUAD_TABLE256(2, 1, 0, -9);
+
+bool PgenReader::ReadMaybeSparseHardcalls(int const& thr, int variant_idx, int32_t* common_geno_out,
+                                          std::vector<int>& sample_ids, std::vector<int>& genos,
+                                          std::vector<int>& dense_buf) {
+  if (!_info_ptr) {
+    fprintf(stderr, "pgen is closed");
+    exit(-1);
+  }
+  if (static_cast<uint32_t>(variant_idx) >= _info_ptr->raw_variant_ct) {
+    char errstr_buf[256];
+    snprintf(errstr_buf, 256, "variant_num out of range (%d; must be 1..%u)", variant_idx + 1, _info_ptr->raw_variant_ct);
+    fprintf(stderr, "%s", errstr_buf);
+    exit(-1);
+  }
+  const uint32_t subset_size = _subset_size[thr];
+  uint32_t difflist_common_geno = UINT32_MAX;
+  uint32_t difflist_len = 0;
+  plink2::PglErr reterr = plink2::PgrGetDifflistOrGenovec(
+      _subset_include_vec[thr], _subset_index[thr], subset_size, _max_difflist_len,
+      variant_idx, _state_ptr[thr], _pgv[thr]->genovec, &difflist_common_geno,
+      _raregeno_buf[thr], _difflist_sample_ids_buf[thr], &difflist_len);
+  if (reterr != plink2::kPglRetSuccess) {
+    char errstr_buf[256];
+    snprintf(errstr_buf, 256, "PgrGetDifflistOrGenovec() error %d", static_cast<int>(reterr));
+    fprintf(stderr, "%s", errstr_buf);
+    exit(-1);
+  }
+  if (difflist_common_geno == UINT32_MAX) {
+    // dense: expand the full genovec (REF-count coding, same as ReadIntHardcalls)
+    if (dense_buf.size() != subset_size) {
+      dense_buf.resize(subset_size);
+    }
+    plink2::GenoarrLookup256x4bx4(_pgv[thr]->genovec, kGenoRInt32QuadsFlipped, subset_size, dense_buf.data());
+    *common_geno_out = -9;
+    return false;
+  }
+  // sparse: report the common genotype and the non-common (sample, geno) exceptions,
+  // all in REF-count coding to match ReadIntHardcalls(allele_idx=0).
+  *common_geno_out = (difflist_common_geno == 3) ? -9 : (2 - static_cast<int32_t>(difflist_common_geno));
+  genos.resize(difflist_len);
+  if (difflist_len) {
+    plink2::GenoarrLookup256x4bx4(_raregeno_buf[thr], kGenoRInt32QuadsFlipped, difflist_len, genos.data());
+  }
+  sample_ids.resize(difflist_len);
+  for (uint32_t i = 0; i < difflist_len; ++i) {
+    sample_ids[i] = static_cast<int>(_difflist_sample_ids_buf[thr][i]);
+  }
+  return true;
 }
 

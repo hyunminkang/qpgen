@@ -541,6 +541,8 @@ bool PgenIdxReader::read_pos(const char* chrom, int32_t pos) {
         pivar_loaded = true;
     }
 
+    notice("Jumping to %s:%d in %s, icol_pivar_idx: %d", chrom, pos, pivarf.c_str(), icol_pivar_idx);
+
     tr_pivar.jump_to(chrom, pos);
     while( tr_pivar.read_line() ) { // find the variant
         if ( tr_pivar.nfields < icol_pivar_idx ) {
@@ -587,7 +589,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             tr_pivar.jump_to(cpra_obj.chrom.c_str(), cpra_obj.pos);
         }
         while( tr_pivar.read_line() ) { // find the variant
-            if ( tr_pivar.nfields < 9 ) {
+            if ( tr_pivar.nfields <= icol_pivar_idx ) {
                 error("Invalid pvar file format at %s", pivarf.c_str());
                 return false;
             }
@@ -618,7 +620,7 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             const char* chrom = tr_pivar.str_field_at(0);
             if ( chrom[0] == '#' ) continue;
 
-            if ( tr_pivar.nfields < 9 ) {
+            if ( tr_pivar.nfields <= icol_pivar_idx ) {
                 error("Invalid pvar file format at %s", pivarf.c_str());
                 return false;
             }
@@ -636,10 +638,15 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             return true;
         }
     }
-    return true;
+    return false; // reached end of file without finding the next variant
 }
 
-bool PgenIdxReader::get_genos(int32_t var_idx) {
+// Reads the current (or specified) variant, opportunistically keeping the
+// sparse (difflist) representation for hardcall-only variants. When the variant
+// is read sparsely, int_buf is NOT expanded; consumers should use is_sparse() /
+// get_sparse_*() instead. When read densely, int_buf (or dbl_buf for dosages) is
+// fully populated as usual.
+bool PgenIdxReader::get_genos_sparse(int32_t var_idx) {
     // load the genotypes if needed
     if ( !pgen_loaded ) {
         notice("Loading pgen file %s with %zu/%zu samples", pgenf.c_str(), samp_idx.size(), samps.size());
@@ -649,14 +656,39 @@ bool PgenIdxReader::get_genos(int32_t var_idx) {
         dbl_buf = (double*)malloc(sizeof(double) * samp_idx.size());
     }
 
-    // read the genotypes, read as integers
+    int32_t vidx = var_idx < 0 ? cur_var_idx : var_idx;
+
     if ( dosage_present ) {
-        pgr.Read(dbl_buf, (size_t)samp_idx.size(), 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+        // dosage variants have no sparse hardcall representation; read densely
+        cur_is_sparse = false;
+        if ( mean_impute_dosage ) {
+            // missing dosages are replaced by the variant mean dosage
+            pgr.ReadMeanimpute(dbl_buf, (size_t)samp_idx.size(), 0, vidx, 0);
+        }
+        else {
+            pgr.Read(dbl_buf, (size_t)samp_idx.size(), 0, vidx, 0);
+        }
     }
     else {
-        pgr.ReadIntHardcalls(int_buf, 0, var_idx < 0 ? cur_var_idx : var_idx, 0);
+        // returns true (sparse: sparse_* filled) or false (dense: int_buf filled)
+        cur_is_sparse = pgr.ReadMaybeSparseHardcalls(0, vidx, &sparse_common_geno, sparse_sample_idxs, sparse_genos, int_buf);
     }
     return true;
+}
+
+bool PgenIdxReader::get_genos(int32_t var_idx) {
+    bool ret = get_genos_sparse(var_idx);
+    // backward-compatible behavior: always provide the fully expanded int_buf
+    if ( ret && cur_is_sparse ) {
+        int32_t n = (int32_t)samp_idx.size();
+        if ( (int32_t)int_buf.size() != n ) int_buf.resize(n);
+        std::fill(int_buf.begin(), int_buf.end(), sparse_common_geno);
+        for(size_t k=0; k < sparse_sample_idxs.size(); ++k) {
+            int_buf[sparse_sample_idxs[k]] = sparse_genos[k];
+        }
+        cur_is_sparse = false; // int_buf now holds the dense representation
+    }
+    return ret;
 }
 
 bool PgenIdxReader::sample_ids_sorted() const {
@@ -826,6 +858,7 @@ bool MultiPgenIdxReader::read_pivar(const char* cpra) {      // change the curre
         }
     }
 }
+
 bool MultiPgenIdxReader::get_genos() {                               // read the genotypes at the current variant position
     if ( idx_cur_reader >= 0 ) {
         bool ret = p_readers[idx_cur_reader]->get_genos();
@@ -838,10 +871,37 @@ bool MultiPgenIdxReader::get_genos() {                               // read the
                 int_buf = p_readers[idx_cur_reader]->get_int_buf();
             }
         }
-        return ret;   
+        return ret;
     }
     return false;
 }
+
+bool MultiPgenIdxReader::get_genos_sparse() {                        // read genotypes, keeping the sparse representation when possible
+    if ( idx_cur_reader >= 0 ) {
+        PgenIdxReader* pr = p_readers[idx_cur_reader];
+        bool ret = pr->get_genos_sparse();
+        if ( ret ) {
+            if ( dosage_present ) {
+                dbl_buf = (double*)pr->get_dbl_buf();
+            }
+            else if ( !pr->is_sparse() ) {
+                // dense hardcalls: mirror get_genos() copy behavior
+                int_buf = pr->get_int_buf();
+            }
+            // sparse: exposed via is_sparse()/get_sparse_*() delegating accessors
+        }
+        return ret;
+    }
+    return false;
+}
+
+// bool MultiPgenIdxReader::compute_geno_stats() {
+//     if ( idx_cur_reader >= 0 ) {
+//         bool ret = p_readers[idx_cur_reader]->compute_geno_stats();
+//         return ret;   
+//     }
+//     return false;
+// }
 
 void MultiPgenIdxReader::set_n_threads(int32_t n) { 
     nthreads = n; 

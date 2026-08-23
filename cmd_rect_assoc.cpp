@@ -24,7 +24,7 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     std::string samplef;
     std::string pheno_format("regenie");
     std::string cov_format("regenie");
-    int32_t jump_thres_bp = 1000000; 
+    int32_t jump_thres_bp = 1000000;
     int32_t max_chunk_vars = 100; // Maximum number of variants to store at once in memory
     int32_t icol_pivar_idx = 9;
     int32_t icol_pheno_id = 1;
@@ -71,124 +71,59 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     pl.Read(argc, argv);
     pl.Status();
 
-    // open the Plink file
-    MultiPgenIdxReader mpr;
-    if ( !pgenlistf.empty() ) { // list is provided
-        //notice("foo");
-        if ( pgenf.empty() && pivarf.empty() && psamf.empty() ) {
-            if ( !mpr.prep_pgen_list(pgenlistf.c_str()) ) {
-                error("Failed to prepare pgen files with the following list file: %s", pgenlistf.c_str());
-            }
-        }
-        else {
-            error("When --list is provided, --pgen, --pivar, and --psam should not be provided");
-        }
+    // check required arguments
+    if ( phef.empty() ) {
+        error("Phenotype file (--pheno) is required");
     }
-    else {
-        //notice("bar");
-        if ( pgenf.empty() || pivarf.empty() || psamf.empty() ) {
-            error("When --list is not provided, --pgen, --pivar, and --psam should be provided");
-        }
-        if ( !mpr.set_single_chunk_pgen(pgenf.c_str(), pivarf.c_str(), psamf.c_str()) ) {
-            error("Failed to add pgen files with the following files:\n%s\n%s\n%s", pgenf.c_str(), pivarf.c_str(), psamf.c_str());
-        }
+    if ( varlistf.empty() ) {
+        error("Variant list file (--var-list) is required");
     }
-    mpr.set_jump_thres_bp(jump_thres_bp);
-    mpr.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
+    if ( outf.empty() ) {
+        error("Output prefix (--out) is required");
+    }
 
-    notice("Prepared to load PLINK2 genotype data with %d samples", mpr.get_all_sample_count());
-
-    // load the sample IDs
-    std::vector<std::string> subset_sample_ids;
+    // set up the association input object and configure the parameters. This is the
+    // same plumbing cmd_region_assoc uses, and gives us the covariate-adjusted phenotype
+    // matrix plus the overlapping sample IDs we need to load genotypes against.
+    ind_assoc_input input;
+    input.set_jump_thres_bp(jump_thres_bp);
+    input.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
+    input.set_rint_before_adj(rint_before_adj);
+    input.set_rint_after_adj(rint_after_adj);
     if ( !samplef.empty() ) {
-        notice("Loading sample IDs from %s", samplef.c_str());
-        tsv_reader tr_sample(samplef.c_str());
-        while(tr_sample.read_line()) {
-            subset_sample_ids.push_back(tr_sample.str_field_at(0));
-        }
-        notice("Loaded %d sample IDs from %s to subset the genotype and phenotype data", (int32_t)subset_sample_ids.size(), samplef.c_str());
+        input.set_subset_sample_file(samplef.c_str());
     }
 
-    // find overlapping sample IDs
-    const std::vector<plink_samp_t>& geno_all_samps = mpr.get_all_samples();
-    std::vector<std::string> geno_all_samp_ids;
-    for(int32_t i=0; i < geno_all_samps.size(); ++i) {
-        geno_all_samp_ids.push_back(geno_all_samps[i].indID);
-    }
-
-    notice("Loading phenotype matrix from %s", phef.c_str());
-
-    // load the phenotype matrix
-    PhenoMatrix pheno_matrix;
-    if ( !pheno_matrix.load_pheno_matrix(phef.c_str(), pheno_format.c_str()) ) {
-        error("Failed to load the phenotype matrix from file %s", phef.c_str());
-    }
-
-    notice("Loaded phenotype matrix with %d samples and %d phenotypes from %s", (int32_t)pheno_matrix.samp_ids.size(), (int32_t)pheno_matrix.pheno_ids.size(), phef.c_str());
-
-    PhenoMatrix cov_matrix;
-    if ( !covf.empty() ) {
-        notice("Loading covariate matrix from %s", covf.c_str());
-        if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str()) ) {
-            error("Failed to load the covariate matrix from file %s", covf.c_str());
+    if ( !pgenlistf.empty() ) {
+        if ( !pgenf.empty() || !pivarf.empty() || !psamf.empty() ) {
+            error("When --pgen-list is provided, --pgen, --pivar, and --psam should not be provided");
         }
-        notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf.c_str());
+        input.process_pgenlist(pgenlistf.c_str(), phef.c_str(), pheno_format.c_str(), covf.c_str(), cov_format.c_str());
     }
-
-    // load the covariate matrix
-    std::vector<std::string> overlapping_sample_ids;
-    if ( !subset_sample_ids.empty() ) {
-        std::vector<std::string> temp1_ids;
-        std::vector<std::string> temp2_ids;
-        identify_overlapping_ids(subset_sample_ids, geno_all_samp_ids, temp1_ids);
-        if ( covf.empty() ) {
-            identify_overlapping_ids(temp1_ids, pheno_matrix.samp_ids, overlapping_sample_ids);
-        }
-        else {
-            identify_overlapping_ids(temp1_ids, cov_matrix.samp_ids, temp2_ids);
-            identify_overlapping_ids(temp2_ids, pheno_matrix.samp_ids, overlapping_sample_ids);
-        }
+    else if ( !pgenf.empty() && !pivarf.empty() && !psamf.empty() ) {
+        input.process_single_pgen(pgenf.c_str(), pivarf.c_str(), psamf.c_str(), phef.c_str(), pheno_format.c_str(), covf.c_str(), cov_format.c_str());
     }
     else {
-        if ( covf.empty() ) {
-            identify_overlapping_ids(geno_all_samp_ids, pheno_matrix.samp_ids, overlapping_sample_ids);
-        }
-        else {
-            std::vector<std::string> temp1_ids;
-            identify_overlapping_ids(geno_all_samp_ids, cov_matrix.samp_ids, temp1_ids);
-            identify_overlapping_ids(temp1_ids, pheno_matrix.samp_ids, overlapping_sample_ids);
-        }
+        error("Either --pgen-list or (--pgen, --pivar, and --psam) must be provided");
     }
-    notice("%zu overlapping samples found among sample, genotype, phenotype, and covariate files", (int32_t)overlapping_sample_ids.size());
 
-    if ( !pheno_matrix.sample_ids_sorted() || ( pheno_matrix.samp_ids.size() != overlapping_sample_ids.size() ) ) {
-        notice("Subsetting the phenotype matrix to the overlapping samples");
-        pheno_matrix.subset_sample_ids(overlapping_sample_ids);
-    }
-    if ( !covf.empty() ) {
-        if ( !cov_matrix.sample_ids_sorted() || ( cov_matrix.samp_ids.size() != overlapping_sample_ids.size() ) ) {
-            notice("Subsetting the covariate matrix to the overlapping samples");
-            cov_matrix.subset_sample_ids(overlapping_sample_ids);
-        }
-    }
-    if ( !mpr.sample_ids_sorted() ||  mpr.get_all_sample_count() != overlapping_sample_ids.size() ) {
-        notice("Subsetting the genotype data to %zu overlapping samples", (int32_t)overlapping_sample_ids.size());
-        mpr.subset_sample_ids(overlapping_sample_ids);
-    }
-    int32_t n_overlapping_samples = (int32_t)overlapping_sample_ids.size();
+    const int32_t n_overlapping_samples = (int32_t)input.overlapping_sample_ids.size();
 
-    // load the trait list
+    // load_pheno_cov_matrices already applies rint-before-adj / covariate adjustment /
+    // rint-after-adj to input.pheno_matrix, so from here we just consume input.pheno_matrix.pheno_mat.
+    PhenoMatrix& pheno_matrix = input.pheno_matrix;
+
+    // load the trait list -- keep the permissive overlap semantics the original had:
+    // phenotypes named in --pheno-list that are not in the pheno file are silently dropped
     if ( !phelistf.empty() ) {
         tsv_reader tr_phelist(phelistf.c_str());
         std::vector<std::string> phelist_ids;
         while( tr_phelist.read_line() ) {
-            //notice("foo");
             if ( tr_phelist.nfields != 1 ) {
-                error("Invalid format phenotype list file %s in line %zu starting with %s. Must containing only 1 field", phelistf.c_str(), (int32_t)phelist_ids.size() + 1, tr_phelist.str_field_at(0) );
+                error("Invalid format phenotype list file %s in line %zu starting with %s. Must contain only 1 field", phelistf.c_str(), (int32_t)phelist_ids.size() + 1, tr_phelist.str_field_at(0) );
             }
             phelist_ids.push_back( tr_phelist.str_field_at(0) );
         }
-        //notice("bar");
         std::vector<std::string> overlapping_phe_ids;
         notice("Loaded %d phenotype IDs from %s to subset the phenotype matrix", (int32_t)phelist_ids.size(), phelistf.c_str());
         identify_overlapping_ids(phelist_ids, pheno_matrix.pheno_ids, overlapping_phe_ids);
@@ -196,7 +131,6 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         if ( pheno_matrix.subset_pheno_ids(overlapping_phe_ids) != (int32_t)overlapping_phe_ids.size() ) {
             error("Failed to subset the phenotype matrix based on the provided phenotype list in %s", phelistf.c_str());
         }
-        //notice("foo");
     }
 
     // load the variant list
@@ -209,10 +143,10 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         }
         else if ( tr_varlist.nfields >= 4 ) {
             char buf[65536];
-            snprintf(buf, sizeof(buf), "%s:%s:%s:%s", 
-                tr_varlist.str_field_at(0), 
-                tr_varlist.str_field_at(1), 
-                tr_varlist.str_field_at(2), 
+            snprintf(buf, sizeof(buf), "%s:%s:%s:%s",
+                tr_varlist.str_field_at(0),
+                tr_varlist.str_field_at(1),
+                tr_varlist.str_field_at(2),
                 tr_varlist.str_field_at(3));
             varlist_cpra.push_back(buf);
         }
@@ -221,37 +155,10 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         }
     }
 
-    // adjust phenotype matrix by covariates
-    if ( rint_before_adj ) {
-        notice("Performing rank-based inverse normal transformation for all phenotypes before covariate adjustment");
-        if ( !pheno_matrix.has_missing ) {
-            pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
-        }
-        else {
-            error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
-        }
-    }
-
-    // perform covariate adjustment
-    if ( !covf.empty() ) {
-        notice("Adjusting phenotypes by covariates using linear regression");
-        if ( pheno_matrix.has_missing || cov_matrix.has_missing ) {
-            error("Covariate adjustment is currently only supported for phenotype and covariate matrices without missing values");
-        }
-        else {
-            pheno_matrix.pheno_mat = pheno_adj_cov_nxt_without_missing(pheno_matrix.pheno_mat, cov_matrix.pheno_mat);
-        }
-    }
-
-    if ( rint_after_adj ) {
-        notice("Performing rank-based inverse normal transformation for all phenotypes after covariate adjustment");
-        if ( !pheno_matrix.has_missing ) {
-            pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
-        }
-        else {
-            error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
-        }
-    }
+    // whether covariate residualization of the genotype chunks is required (Frisch-Waugh-Lovell).
+    // load_pheno_cov_matrices adjusted the phenotype matrix; to estimate partial effects we must
+    // adjust the genotype matrix against the same covariates as well.
+    const bool have_cov = !covf.empty() && input.cov_matrix.pheno_mat.cols() > 0;
 
     // open the output file gz or plain based on the extension
     htsFile* wf = hts_open(outf.c_str(), outf.substr(outf.length() - 3).compare(".gz") == 0 ? "wz" : "w");
@@ -281,44 +188,43 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         std::vector<var_cnt_t> chunk_var_cnts;
         for(int32_t j=0; j < chunk_size; ++j) {
             int32_t gcs[3] = {0, 0, 0};
-            if ( !mpr.read_pivar(varlist_cpra[i + j].c_str()) ) {
+            if ( !input.mpr.read_pivar(varlist_cpra[i + j].c_str()) ) {
                 notice("Skipping variant %s, which is not found in the genotype data", varlist_cpra[i + j].c_str());
                 ++n_skipped;
                 continue;
             }
             else {
                 // load the genotype data
-                if ( !mpr.get_genos() ) {
+                if ( !input.mpr.get_genos() ) {
                     notice("Cannot load genotype data for variant %s. Skipping", varlist_cpra[i + j].c_str());
                     ++n_skipped;
                     continue;
                 }
                 int32_t jv = j - n_skipped;
-                const std::vector<int32_t>& int_buf = mpr.get_int_buf();
-                const double* dbl_buf = mpr.get_dbl_buf();
+                const std::vector<int32_t>& int_buf = input.mpr.get_int_buf();
+                const double* dbl_buf = input.mpr.get_dbl_buf();
                 int32_t an = 0;
                 double ac = 0;
                 double info = 0;
-                if ( mpr.is_dosage_present() ) {
+                if ( input.mpr.is_dosage_present() ) {
                     if ( dbl_buf == NULL) {
-                        dbl_buf = mpr.get_dbl_buf();
+                        dbl_buf = input.mpr.get_dbl_buf();
                     }
                     double sumsq = 0;
-                    for(int32_t i =0; i < n_overlapping_samples; ++i) {
-                        double ds = 2.0 - dbl_buf[i];
-                        geno_mat(i, jv) = ds;
-                        geno_mask(i, jv) = true; // not missing
+                    for(int32_t k =0; k < n_overlapping_samples; ++k) {
+                        double ds = 2.0 - dbl_buf[k];
+                        geno_mat(k, jv) = ds;
+                        geno_mask(k, jv) = true; // not missing
                         ac += ds;
                         an += 2;
                         ++gcs[(ds < 0.5) ? 0 : ( (ds < 1.5) ? 1 : 2 )];
                         sumsq += (ds * ds);
                     }
                     double af = ac / (double)an;
-                    for(int32_t i =0; i < n_overlapping_samples; ++i) {
-                        geno_mat(i, jv) -= (2 * af); // center to zero
+                    for(int32_t k =0; k < n_overlapping_samples; ++k) {
+                        geno_mat(k, jv) -= (2 * af); // center to zero
                     }
-                    //if ( ac == 0 || an == ac ) {
-            
+
                     if ( ac < min_mac || af < min_maf || (1.0 - af) < min_maf  || an - ac < min_mac ) {
                         // skip rare variants below the MAF or MAC threshold
                         ++n_skipped;
@@ -331,8 +237,8 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                     info = ( sumsq / 2 * an - 4 * ac * ac ) / ( 2 * ac * ( an - ac ) );
                 }
                 else {
-                    for(int32_t i = 0; i < n_overlapping_samples; ++i) {
-                        switch(int_buf[i]) { // make sure to convert 1-based index to 0-based
+                    for(int32_t k = 0; k < n_overlapping_samples; ++k) {
+                        switch(int_buf[k]) { // make sure to convert 1-based index to 0-based
                         case 0:
                             an += 2;
                             ac += 2;
@@ -361,25 +267,23 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                     // Exp(Var(g)) = af * (1-af) * 2 = mean * (2 - mean) / 2;
                     // Var(g) = EX^2 - EX^2 = (4 * n_2 + 1 * n_1)/n - mean^2
                     info = ((4.0 * gcs[2] + gcs[1])/(an/2.0) - mean * mean) / (mean * (2.0 - mean) / 2.0);
-                    //notice("mean = %.5g, an = %d, ac = %d", mean, an, ac);
-                    for(int32_t i = 0; i < n_overlapping_samples; ++i) {
-                        switch(int_buf[i]) {
+                    for(int32_t k = 0; k < n_overlapping_samples; ++k) {
+                        switch(int_buf[k]) {
                         case 0:
-                            geno_mat(i, jv) = 2.0 - mean; // homalt
-                            geno_mask(i, jv) = true; // not missing
+                            geno_mat(k, jv) = 2.0 - mean; // homalt
+                            geno_mask(k, jv) = true; // not missing
                             break;
                         case 1:
-                            geno_mat(i, jv) = 1.0 - mean; // het
-                            geno_mask(i, jv) = true; // not missing
+                            geno_mat(k, jv) = 1.0 - mean; // het
+                            geno_mask(k, jv) = true; // not missing
                             break;
                         case 2:
-                            geno_mat(i, jv) = 0.0 - mean; // homref
-                            geno_mask(i, jv) = true; // not missing
+                            geno_mat(k, jv) = 0.0 - mean; // homref
+                            geno_mask(k, jv) = true; // not missing
                             break;
                         default:
-                            geno_mat(i, jv) = 0; // missing - mean imputation
-                            geno_mask(i, jv) = false; // missing
-                            //++n_geno_missing;
+                            geno_mat(k, jv) = 0; // missing - mean imputation
+                            geno_mask(k, jv) = false; // missing
                             geno_has_missing = true;
                             break;
                         }
@@ -387,12 +291,23 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                 }
                 chunk_cpras.push_back(varlist_cpra[i + j]);
                 chunk_var_cnts.push_back( var_cnt_t( an, ac, gcs[0], gcs[1], gcs[2] ) );
-                //++n_pass;
             }
         }
         int32_t new_chunk_size = chunk_size - n_skipped;
         geno_mat.conservativeResize(Eigen::NoChange, new_chunk_size);
         geno_mask.conservativeResize(Eigen::NoChange, new_chunk_size);
+
+        // Residualize the genotypes against the same covariates used to adjust the phenotype
+        // (Frisch-Waugh-Lovell). See load_genotype_chunk() in assoc_utils.cpp -- adjusting only
+        // the phenotype leaves genotype variance collinear with the covariates in the design,
+        // which shrinks beta and the test statistic. Applied here to match cmd_region_assoc.
+        if ( have_cov && new_chunk_size > 0 ) {
+            if ( input.cov_matrix.pheno_mat.rows() != n_overlapping_samples ) {
+                error("Covariate matrix has %d rows but %d overlapping samples were expected",
+                      (int32_t)input.cov_matrix.pheno_mat.rows(), n_overlapping_samples);
+            }
+            geno_mat = pheno_adj_cov_nxt_without_missing(geno_mat, input.cov_matrix.pheno_mat);
+        }
 
         // perform rectangular association analysis
         std::vector<std::vector<slr_sumstat_t> > rect_results;

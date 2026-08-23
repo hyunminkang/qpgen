@@ -10,6 +10,94 @@
 #include "Eigen/Dense"
 #include <cmath>
 
+#include <Eigen/Dense>
+#include <cmath>
+#include <limits>
+
+struct ShrinkageMinimizer {
+    Eigen::MatrixXd MN;          // (M elementwise-product N), p x p
+    Eigen::VectorXd d;           // eigenvalues, length p
+    Eigen::VectorXd oneMinusD;   // 1 - d_i, length p
+
+    ShrinkageMinimizer(const Eigen::MatrixXd& X,
+                       const Eigen::MatrixXd& Y,
+                       const Eigen::MatrixXd& U,
+                       const Eigen::VectorXd& d_)
+        : d(d_),
+          oneMinusD(Eigen::VectorXd::Ones(d_.size()) - d_)
+    {
+        const Eigen::MatrixXd A = X * U;                          // n x p
+        const Eigen::MatrixXd B = U.transpose() * Y.transpose();  // p x m
+        const Eigen::MatrixXd M = A.transpose() * A;              // p x p (sym)
+        const Eigen::MatrixXd N = B * B.transpose();              // p x p (sym)
+        MN.noalias() = M.cwiseProduct(N);
+    }
+
+    // f(lambda) = ||X U ((1-lambda)D + lambda I)^{-1} U^T Y^T||_F^2
+    double squaredNorm(double lambda) const {
+        Eigen::VectorXd g = d + lambda * oneMinusD;          // (1-l)d + l
+        if ((g.array() <= 0.0).any())
+            return std::numeric_limits<double>::infinity();
+        Eigen::VectorXd w = g.cwiseInverse();
+        double sqnorm = w.dot(MN * w);
+        notice("Evaluating squaredNorm at lambda = %g: sqnorm = %g, min(g) = %g, max(g) = %g, min(w) = %g, max(w) = %g", lambda, sqnorm, g.minCoeff(), g.maxCoeff(), w.minCoeff(), w.maxCoeff());
+        return sqnorm;
+    }
+
+    // Golden-section search on [a, b]. Assumes f is unimodal on the interval
+    // (typically true when d_i >= 0 and search range is [0, 1]).
+    double findOptimalLambda(double a = 0.0, double b = 1.0,
+                             double tol = 1e-9, int maxIter = 200) const {
+        const double phi = (std::sqrt(5.0) - 1.0) / 2.0;  // ~0.6180339887
+        double x1 = b - phi * (b - a);
+        double x2 = a + phi * (b - a);
+        double f1 = squaredNorm(x1);
+        double f2 = squaredNorm(x2);
+
+        for (int i = 0; i < maxIter && (b - a) > tol; ++i) {
+            if (f1 < f2) {
+                b  = x2;
+                x2 = x1;          f2 = f1;
+                x1 = b - phi * (b - a);
+                f1 = squaredNorm(x1);
+            } else {
+                a  = x1;
+                x1 = x2;          f1 = f2;
+                x2 = a + phi * (b - a);
+                f2 = squaredNorm(x2);
+            }
+        }
+        return 0.5 * (a + b);
+    }
+};
+
+double ledoit_wolf_shrinkage_parameter(const Eigen::MatrixXd& total_cov, const Eigen::MatrixXd& prs_mat, const Eigen::MatrixXd& pheno_mat) {
+    int n = prs_mat.rows();
+    int p = prs_mat.cols();
+    if ( ( p != pheno_mat.cols() ) ) {
+        error("PRS and phenotype matrices must have the same dimensions - got %d x %d and %d x %d", (int32_t)prs_mat.rows(), (int32_t)prs_mat.cols(), (int32_t)pheno_mat.rows(), (int32_t)pheno_mat.cols());
+    }
+    if ( ( p != total_cov.rows() ) || ( p != total_cov.cols() ) ) {
+        error("Total covariance matrix must have the same dimensions as the number of traits - got %d x %d", (int32_t)total_cov.rows(), (int32_t)total_cov.cols());
+    }
+
+    // perform Eigendecomposition of the total covariance matrix
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_solver(total_cov);
+    if ( eig_solver.info() != Eigen::Success ) {
+        error("Failed to perform eigendecomposition of the total covariance matrix");
+    }
+    Eigen::VectorXd eig_vals = eig_solver.eigenvalues();
+    Eigen::MatrixXd eig_vecs = eig_solver.eigenvectors();
+
+    // compute the Ledoit-Wolf shrinkage parameter
+    ShrinkageMinimizer minimizer(prs_mat, pheno_mat, eig_vecs, eig_vals);
+    double lambda = minimizer.findOptimalLambda(0.0, 1.0);
+    double minVal = std::sqrt(minimizer.squaredNorm(lambda));
+    notice("Optimal shrinkage parameter (lambda) found: %g with minimum Frobenius norm: %g", lambda, minVal);
+    return lambda;
+}
+
+
 int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 {
     std::string prsf;       // PRS files
@@ -24,11 +112,13 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     std::string cov_format("regenie");
     bool rint_after_adj = false;   // Perform rank-based inverse normal transformation after covariate adjustment
     bool use_mahalanobis = false;  // Use Mahalanobis distance for matching
+    bool use_ledoit_wolf = false; // Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance
     double min_weight = 0.0;  // minimum weight (in r) per trait to set to zero
     double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
     double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
     int32_t n_threads = 1;
     double lambda = 0.0; // regularization parameter for Mahalanobis distance
+    double weight_prs_mh = 0.5; // weight for MH distance when combining with weighted correlation
 
     paramList pl;
 
@@ -50,6 +140,8 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Analysis options", NULL)
     LONG_PARAM("rint", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
     LONG_PARAM("mahalanobis", &use_mahalanobis, "Use Mahalanobis distance for matching (default: false)")
+    LONG_PARAM("ledoit-wolf", &use_ledoit_wolf, "Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance (default: false)")
+    LONG_DOUBLE_PARAM("weight-prs-mh", &weight_prs_mh, "Weight for PRS distance when combining with weighted correlation (default: 0.5)")
     LONG_DOUBLE_PARAM("lambda", &lambda, "Regularization parameter for Mahalanobis distance (default: 1.0)")
     LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
     LONG_DOUBLE_PARAM("z-threshold", &z_lenient_threshold, "Z-score threshold for lenient matching (default: 1.96)")
@@ -295,10 +387,22 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         notice("Computing phenotype covariance matrix");
         Eigen::MatrixXd pheno_cov = pheno_matrix.pheno_mat.transpose() * pheno_matrix.pheno_mat / (double)pheno_matrix.pheno_mat.rows();
         notice("Comptuing total covariance matrix");
-        Eigen::MatrixXd total_cov = prs_cov + pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+        Eigen::MatrixXd total_cov = weight_prs_mh * prs_cov + (1.0 - weight_prs_mh) * pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+        if ( lambda < 0.0 || lambda > 1.0 ) {
+            error("Invalid value for lambda: %.4f. Must be between 0 and 1", lambda);
+        }
+        if ( use_ledoit_wolf ) {
+            if ( lambda > 0 ) {
+                error("Cannot use Ledoit-Wolf shrinkage when lambda is greater than 0. Please set lambda to 0 to use Ledoit-Wolf shrinkage or set lambda to a value between 0 and 1 to use regularization without Ledoit-Wolf shrinkage");
+            }
+            else {
+                lambda = ledoit_wolf_shrinkage_parameter(total_cov, prs_matrix.pheno_mat, pheno_matrix.pheno_mat);
+                notice("Using Ledoit-Wolf shrinkage with lambda = %.4f", lambda);
+            }
+        }
         if ( lambda > 0 ) {
             notice("Adding regularization parameter %.4f to total covariance matrix", lambda);
-            total_cov += lambda * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
+            total_cov = (1-lambda) * total_cov + lambda * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
         }
         notice("Inverting total covariance matrix");
         Eigen::MatrixXd total_cov_inv = total_cov.inverse();

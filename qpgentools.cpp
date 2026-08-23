@@ -6,12 +6,13 @@ int32_t test_qpgen(int32_t argc, char** argv);
 int32_t match_plp_geno(int32_t argc, char** argv);
 int32_t join_plp_geno(int32_t argc, char** argv);
 int32_t cmd_geno2tsv(int32_t argc, char** argv);
+int32_t cmd_pgen2tsv(int32_t argc, char** argv);
 int32_t cmd_pair_assoc(int32_t argc, char** argv);
 int32_t cmd_pair_assoc_v0(int32_t argc, char** argv);
 int32_t cmd_rect_assoc(int32_t argc, char** argv);
 int32_t cmd_pair_prs(int32_t argc, char** argv);
 int32_t cmd_match_prs_pheno(int32_t argc, char** argv);
- 
+int32_t cmd_region_assoc(int32_t argc, char** argv);
 int32_t main(int32_t argc, char** argv) {
   commandList cl;
 
@@ -21,6 +22,7 @@ int32_t main(int32_t argc, char** argv) {
     LONG_COMMAND("pair-assoc-v0", &cmd_pair_assoc_v0, "Perform pairwise association analysis for specific pairs of phenotype variant pairs (old version)")
     LONG_COMMAND("pair-prs", &cmd_pair_prs, "Perform pairwise PRS generation based on summary statistics")
     LONG_COMMAND("rect-assoc", &cmd_rect_assoc, "Perform rectangular association analysis for multiple phenotypes and variants")
+    LONG_COMMAND("region-assoc", &cmd_region_assoc, "Perform association analysis for a specific region and multiple phenotypes")
     LONG_COMMAND("match-prs-pheno", &cmd_match_prs_pheno, "Match PRS and phenotype matrices based on overlapping samples and compute weights for each phenotype")
 
     LONG_COMMAND_GROUP("Utilities for sequence data", NULL)
@@ -29,6 +31,7 @@ int32_t main(int32_t argc, char** argv) {
 
     LONG_COMMAND_GROUP("Utilities for genotype extraction", NULL)
     LONG_COMMAND("geno2tsv", &cmd_geno2tsv, "Extract genotypes into TSV format")
+    LONG_COMMAND("pgen2tsv", &cmd_pgen2tsv, "Extract PGEN genotypes (0/1/2 ALT coding) into TSV with AF/AC filters and sparse support")
 
     LONG_COMMAND_GROUP("Other Utilities", NULL)
     LONG_COMMAND("test-qpgen", &test_qpgen, "Test software to check the qpgen library")
