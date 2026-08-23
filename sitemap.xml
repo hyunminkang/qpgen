@@ -2,54 +2,62 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://hyunminkang.github.io/qpgen/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/install/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/quickstart/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/formats/genotypes/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/formats/phenotypes/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/geno2tsv/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/join_plp_geno/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/match_plp_geno/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/match_prs_pheno/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/pair_assoc/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/pair_prs/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
+    </url>
+    <url>
+         <loc>https://hyunminkang.github.io/qpgen/tools/pgen2tsv/</loc>
+         <lastmod>2026-08-23</lastmod>
     </url>
     <url>
          <loc>https://hyunminkang.github.io/qpgen/tools/rect_assoc/</loc>
-         <lastmod>2026-02-18</lastmod>
+         <lastmod>2026-08-23</lastmod>
+    </url>
+    <url>
+         <loc>https://hyunminkang.github.io/qpgen/tools/region_assoc/</loc>
+         <lastmod>2026-08-23</lastmod>
     </url>
 </urlset>
