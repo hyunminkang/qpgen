@@ -175,8 +175,10 @@ that belong to a reported credible set appear here.
 * `cs_id` : 1-based credible set index within this trait
 * `alpha` : Posterior inclusion probability of this variant *within this single effect*
 * `region` : Analyzed region, formatted as `CHROM_BEG_END`
+* `n_region_vars` : Number of variants analyzed in this region (identical on every row of the file)
 * `cs_size` : Number of variants in this credible set
-* `lbf` : Log Bayes factor of the single effect defining this credible set
+* `cs_lbf` : Log Bayes factor (natural log) of the single effect defining this credible set, i.e. the prior-weighted average BF over all variants in the region. Constant across all rows of a credible set
+* `var_lbf` : Log Bayes factor (natural log) of *this variant* under that single effect. Related to `alpha` by `var_lbf - cs_lbf = log(alpha) - log(prior)`
 * `mu` : Posterior mean effect, conditional on inclusion
 * `mu2` : Posterior second moment of the effect, conditional on inclusion
 * `af` : Alternative allele frequency
@@ -195,6 +197,7 @@ in the region, whether or not it belongs to a credible set.
 * `#trait` : Trait ID
 * `variant` : Variant ID
 * `region` : Analyzed region, formatted as `CHROM_BEG_END`
+* `n_region_vars` : Number of variants analyzed in this region (identical on every row of the file)
 * `af` : Alternative allele frequency
 * `pip` : Marginal posterior inclusion probability
 * `theta` : Posterior mean unmappable effect on the standardized-genotype scale (equivalent to `susieR`'s `fit$theta`). **Present only with `--unmappable-effects inf` or `ash`.**

@@ -310,7 +310,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             htsFile* wcs = hts_open(cs_path.c_str(), cs_path.substr(cs_path.length() - 3).compare(".gz") == 0 ? "wz" : "w");
             if ( wcs == NULL )
                 error("Cannot open SuSiE credible-set output file %s", cs_path.c_str());
-            hprintf(wcs, "#trait\tvariant\tpip\tcs_id\talpha\tregion\tcs_size\tlbf\tmu\tmu2\taf\tn\tbeta\tse\tlog10p\n");
+            hprintf(wcs, "#trait\tvariant\tpip\tcs_id\talpha\tregion\tn_region_vars\tcs_size\tcs_lbf\tvar_lbf\tmu\tmu2\taf\tn\tbeta\tse\tlog10p\n");
 
             // optional per-variant LBF output: one row per variant, one column per single effect
             const int32_t L_eff = std::max(1, std::min(susie_L, n_vars));
@@ -321,7 +321,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                 wlbf = hts_open(lbf_path.c_str(), lbf_path.substr(lbf_path.length() - 3).compare(".gz") == 0 ? "wz" : "w");
                 if ( wlbf == NULL )
                     error("Cannot open SuSiE LBF output file %s", lbf_path.c_str());
-                hprintf(wlbf, "#trait\tvariant\tregion\taf\tpip");
+                hprintf(wlbf, "#trait\tvariant\tregion\tn_region_vars\taf\tpip");
                 // inf/ash: report per-variant unmappable-effect posterior mean
                 if ( has_theta ) hprintf(wlbf, "\ttheta");
                 for(int32_t l = 0; l < L_eff; ++l) hprintf(wlbf, "\tlbf.L%d", l + 1);
@@ -357,15 +357,20 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                         const var_cnt_t& vcnt = input.geno_chunk.var_cnts[j];
                         const slr_sumstat_t& ss = rect_results[j][k]; // marginal association
                         const double af = (double)vcnt.ac / (double)vcnt.an;
-                        hprintf(wcs, "%s\t%s\t%.6g\t%d\t%.6g\t%s\t%d\t%.6g\t%.6g\t%.6g\t%.6g\t%d\t%.6g\t%.6g\t%.6g\n",
+                        // per-variant log BF (natural log) under the single effect defining this CS
+                        const double var_lbf = (l < (int32_t)res.fit.lbf_variable.rows())
+                            ? res.fit.lbf_variable(l, j) : 0.0;
+                        hprintf(wcs, "%s\t%s\t%.6g\t%d\t%.6g\t%s\t%d\t%d\t%.6g\t%.6g\t%.6g\t%.6g\t%.6g\t%d\t%.6g\t%.6g\t%.6g\n",
                             trait.c_str(),
                             cpra.to_string().c_str(),   // variant C:P:R:A
                             res.fit.pip(j),             // marginal PIP
                             cs_id,
                             res.fit.alpha(l, j),        // posterior prob within this CS
                             region_str.c_str(),
+                            n_vars,                     // number of variants tested in the region
                             cs_size,
-                            cs.lbf,                     // log Bayes factor of the CS
+                            cs.lbf,                     // log BF of the single effect defining this CS
+                            var_lbf,                    // log BF of this variant under that effect
                             res.fit.mu(l, j),           // posterior mean | inclusion
                             res.fit.mu2(l, j),          // posterior 2nd moment | inclusion
                             af,
@@ -385,7 +390,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                         const double af = (double)vcnt.ac / (double)vcnt.an;
                         // marginal PIP = 1 - prod_l(1 - alpha_lj), reported for every
                         // variant regardless of credible-set membership
-                        hprintf(wlbf, "%s\t%s\t%s\t%.6g\t%.6g", trait.c_str(), cpra.to_string().c_str(), region_str.c_str(), af, res.fit.pip(j));
+                        hprintf(wlbf, "%s\t%s\t%s\t%d\t%.6g\t%.6g", trait.c_str(), cpra.to_string().c_str(), region_str.c_str(), n_vars, af, res.fit.pip(j));
                         // inf/ash: unmappable-effect posterior mean (standardized-X scale, like susieR fit$theta)
                         if ( has_theta ) hprintf(wlbf, "\t%.6g", (j < (int32_t)res.fit.theta.size()) ? res.fit.theta(j) : 0.0);
                         for(int32_t l = 0; l < L_eff; ++l) {
