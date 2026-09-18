@@ -49,8 +49,21 @@ include_directories(. simde/ ${HTS_INCLUDE_DIRS} ${QGEN_INCLUDE_DIRS} ${EIGEN3_I
 
 if(APPLE)
     message(STATUS "Configuring for macOS")
-    set(CMAKE_C_COMPILER "/opt/homebrew/opt/llvm/bin/clang")
-    set(CMAKE_CXX_COMPILER "/opt/homebrew/opt/llvm/bin/clang++")
+    # Prefer Homebrew LLVM: the unversioned keg first, then the newest versioned keg (llvm@NN).
+    file(GLOB _LLVM_DIRS /opt/homebrew/opt/llvm /opt/homebrew/opt/llvm@*)
+    list(SORT _LLVM_DIRS ORDER DESCENDING)
+    set(_LLVM_FOUND FALSE)
+    foreach(_dir IN LISTS _LLVM_DIRS)
+        if(EXISTS "${_dir}/bin/clang++" AND NOT _LLVM_FOUND)
+            set(CMAKE_C_COMPILER "${_dir}/bin/clang")
+            set(CMAKE_CXX_COMPILER "${_dir}/bin/clang++")
+            message(STATUS "Using Homebrew LLVM at ${_dir}")
+            set(_LLVM_FOUND TRUE)
+        endif()
+    endforeach()
+    if(NOT _LLVM_FOUND)
+        message(WARNING "Homebrew LLVM not found under /opt/homebrew/opt; using default compiler ${CMAKE_CXX_COMPILER}")
+    endif()
 endif()
 
 

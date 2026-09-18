@@ -62,6 +62,7 @@ bool PhenoMatrix::subset_sample_pheno_indices(const std::vector<int32_t>& samp_i
     }
     rebuild_id2index_map(samp_ids, samp_id2idx);
     rebuild_id2index_map(pheno_ids, pheno_id2idx);
+    recompute_has_missing();
     return true;
 }
 
@@ -103,6 +104,7 @@ int32_t PhenoMatrix::subset_pheno_indices(const std::vector<int32_t>& pheno_indi
     }
 
     rebuild_id2index_map(pheno_ids, pheno_id2idx);
+    recompute_has_missing();
 
     return (int32_t)this->pheno_ids.size();
 }
@@ -138,6 +140,7 @@ int32_t PhenoMatrix::subset_sample_indices(const std::vector<int32_t>& samp_indi
     this->samp_ids = samp_ids_sub;
 
     rebuild_id2index_map(samp_ids, samp_id2idx);
+    recompute_has_missing();
 
     return (int32_t)this->samp_ids.size();
 }

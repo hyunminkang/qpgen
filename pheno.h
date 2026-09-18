@@ -31,6 +31,20 @@ public:
     bool is_missing(const char* str) { return is_missing(std::string(str)); }
     bool add_missing_str(const std::string& str) { return missing_strs.insert(str).second; }
     void reset_missing_strs() { missing_strs.clear(); }
+    // register comma-separated missing strings (e.g. "NA,NaN,."); returns the number of new strings added
+    int32_t add_missing_strs(const std::string& comma_separated_strs) {
+        int32_t n_added = 0;
+        size_t beg = 0;
+        while ( beg <= comma_separated_strs.size() ) {
+            size_t end = comma_separated_strs.find(',', beg);
+            if ( end == std::string::npos ) end = comma_separated_strs.size();
+            if ( end > beg && add_missing_str(comma_separated_strs.substr(beg, end - beg)) ) ++n_added;
+            beg = end + 1;
+        }
+        return n_added;
+    }
+    // refresh has_missing from the current mask (e.g. after subsetting samples or phenotypes)
+    void recompute_has_missing() { has_missing = ( pheno_mask.size() > 0 ) && !pheno_mask.all(); }
     
     bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\0');
     int32_t subset_sample_ids(const std::vector<std::string>& samp_ids);

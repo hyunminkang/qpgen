@@ -110,9 +110,12 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     std::string prs_format("regenie");
     std::string pheno_format("regenie");
     std::string cov_format("regenie");
+    std::string missing_str("NA");  // comma-separated strings representing missing values
+    bool cov_impute_mean = false;  // mean-impute missing covariates instead of dropping samples
     bool rint_after_adj = false;   // Perform rank-based inverse normal transformation after covariate adjustment
     bool use_mahalanobis = false;  // Use Mahalanobis distance for matching
     bool use_ledoit_wolf = false; // Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance
+    bool mh_exact_norm = false;   // Compute PRS norms exactly per phenotype missingness pattern in Mahalanobis mode
     double min_weight = 0.0;  // minimum weight (in r) per trait to set to zero
     double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
     double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
@@ -133,14 +136,17 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_STRING_PARAM("prs-format", &prs_format, "Format of the PRS file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("missing-str", &missing_str, "Comma-separated strings representing missing values in the phenotype and covariate matrices (default: 'NA'). The PRS matrix must not contain missing values")
 
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
 
     LONG_PARAM_GROUP("Analysis options", NULL)
+    LONG_PARAM("cov-impute-mean", &cov_impute_mean, "Mean-impute missing covariate values instead of dropping samples with any missing covariate (default: false)")
     LONG_PARAM("rint", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
     LONG_PARAM("mahalanobis", &use_mahalanobis, "Use Mahalanobis distance for matching (default: false)")
     LONG_PARAM("ledoit-wolf", &use_ledoit_wolf, "Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance (default: false)")
+    LONG_PARAM("mh-exact-norm", &mh_exact_norm, "With --mahalanobis, compute PRS norms exactly for each phenotype missingness pattern instead of approximating with all traits (slower when many patterns exist; default: false)")
     LONG_DOUBLE_PARAM("weight-prs-mh", &weight_prs_mh, "Weight for PRS distance when combining with weighted correlation (default: 0.5)")
     LONG_DOUBLE_PARAM("lambda", &lambda, "Regularization parameter for Mahalanobis distance, between 0 and 1 (default: 0.0)")
     LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
@@ -181,17 +187,26 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 
     // load the phenotype matrix
     PhenoMatrix pheno_matrix;
+    pheno_matrix.add_missing_strs(missing_str);
     if ( !pheno_matrix.load_pheno_matrix(phef.c_str(), pheno_format.c_str()) ) {
         error("Failed to load the phenotype matrix from file %s", phef.c_str());
     }
 
     notice("Loaded phenotype matrix with %d samples and %d phenotypes from %s", (int32_t)pheno_matrix.samp_ids.size(), (int32_t)pheno_matrix.pheno_ids.size(), phef.c_str());
+    if ( pheno_matrix.has_missing ) {
+        int64_t n_missing = (int64_t)pheno_matrix.pheno_mask.size() - (int64_t)pheno_matrix.pheno_mask.cast<int64_t>().sum();
+        notice("Phenotype matrix contains %lld missing values (%.3f%%); traits with missing values will be ignored for the corresponding individuals", (long long)n_missing, 100.0 * (double)n_missing / (double)pheno_matrix.pheno_mask.size());
+    }
 
     notice("Loading PRS matrix from %s", prsf.c_str());
     // load the PRS matrix
     PhenoMatrix prs_matrix;
+    prs_matrix.add_missing_strs(missing_str);
     if ( !prs_matrix.load_pheno_matrix(prsf.c_str(), prs_format.c_str()) ) {
         error("Failed to load the PRS matrix from file %s", prsf.c_str());
+    }
+    if ( prs_matrix.has_missing ) {
+        error("PRS matrix %s contains missing values, which is not supported. Please remove or impute missing PRS values before matching", prsf.c_str());
     }
 
     notice("Loaded PRS matrix with %d samples and %d traits from %s", (int32_t)prs_matrix.samp_ids.size(), (int32_t)prs_matrix.pheno_ids.size(), prsf.c_str());
@@ -200,6 +215,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     PhenoMatrix cov_matrix;
     if ( !covf.empty() ) {
         notice("Loading covariate matrix from %s", covf.c_str());
+        cov_matrix.add_missing_strs(missing_str);
         if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str()) ) {
             error("Failed to load the covariate matrix from file %s", covf.c_str());
         }
@@ -249,6 +265,9 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     }
     notice("Subsetted to %d overlapping phenotypes between PRS and phenotype matrices", (int32_t)pheno_matrix.pheno_ids.size());
 
+    // samples dropped from the phenotype matrix because of missing covariates
+    std::set<std::string> dropped_samp_ids;
+
     // if covariates are provided, subset to overlapping samples
     if ( !covf.empty() ) {
         std::vector<std::string> overlapping_samples;
@@ -261,9 +280,48 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         cov_matrix.subset_sample_ids(overlapping_samples);
         notice("Subsetted phenotype and covariate matrices to %d overlapping samples", (int32_t)overlapping_samples.size());
 
+        if ( cov_matrix.has_missing ) {
+            if ( cov_impute_mean ) {
+                // replace each missing covariate value with the mean of observed values in that column
+                int32_t n_imputed = 0;
+                for ( int32_t j = 0; j < cov_matrix.pheno_mat.cols(); ++j ) {
+                    double sum = 0.0;
+                    int32_t n_obs = 0;
+                    for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
+                        if ( cov_matrix.pheno_mask(i, j) ) { sum += cov_matrix.pheno_mat(i, j); ++n_obs; }
+                    }
+                    double mean = ( n_obs > 0 ) ? sum / (double)n_obs : 0.0;
+                    for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
+                        if ( !cov_matrix.pheno_mask(i, j) ) {
+                            cov_matrix.pheno_mat(i, j) = mean;
+                            cov_matrix.pheno_mask(i, j) = true;
+                            ++n_imputed;
+                        }
+                    }
+                }
+                cov_matrix.recompute_has_missing();
+                notice("Mean-imputed %d missing covariate values (--cov-impute-mean)", n_imputed);
+            }
+            else {
+                // drop samples with any missing covariate from both matrices
+                std::vector<std::string> keep_ids;
+                for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
+                    if ( cov_matrix.pheno_mask.row(i).all() ) keep_ids.push_back( cov_matrix.samp_ids[i] );
+                    else dropped_samp_ids.insert( cov_matrix.samp_ids[i] );
+                }
+                if ( keep_ids.empty() ) {
+                    error("All %d samples have at least one missing covariate value. Consider using --cov-impute-mean", (int32_t)cov_matrix.pheno_mat.rows());
+                }
+                pheno_matrix.subset_sample_ids(keep_ids);
+                cov_matrix.subset_sample_ids(keep_ids);
+                notice("Dropped %d samples with at least one missing covariate value; %d samples retained. These samples will not appear in the output. Use --cov-impute-mean to mean-impute missing covariates instead",
+                       (int32_t)dropped_samp_ids.size(), (int32_t)keep_ids.size());
+            }
+        }
+
         notice("Adjusting phenotypes by covariates using linear regression");
-        if ( pheno_matrix.has_missing || cov_matrix.has_missing ) {
-            error("Covariate adjustment is currently only supported for phenotype and covariate matrices without missing values");
+        if ( pheno_matrix.has_missing ) {
+            pheno_matrix.pheno_mat = pheno_adj_cov_nxt_with_missing(pheno_matrix.pheno_mat, pheno_matrix.pheno_mask, cov_matrix.pheno_mat);
         }
         else {
             pheno_matrix.pheno_mat = pheno_adj_cov_nxt_without_missing(pheno_matrix.pheno_mat, cov_matrix.pheno_mat);
@@ -272,11 +330,11 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 
     if ( rint_after_adj ) {
         notice("Performing rank-based inverse normal transformation for all phenotypes after covariate adjustment");
-        if ( !pheno_matrix.has_missing ) {
-            pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
+        if ( pheno_matrix.has_missing ) {
+            pheno_matrix.pheno_mat = rint_matrix_with_missing(pheno_matrix.pheno_mat, pheno_matrix.pheno_mask);
         }
         else {
-            error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
+            pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
         }
     }
 
@@ -291,6 +349,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     if ( has_sample_map ) {
         notice("Loading sample ID mapping between PRS and phenotype files from %s", sample_mapf.c_str());
         tsv_reader tr_sample_map(sample_mapf.c_str());
+        int32_t n_skipped_dropped = 0;
         while( tr_sample_map.read_line() ) {
             if ( tr_sample_map.nfields > 2 ) {
                 error("Invalid format sample ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", sample_mapf.c_str(), (int32_t)sample_mapf.size() + 1, tr_sample_map.str_field_at(0) );
@@ -303,11 +362,18 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
                 error("PRS trait ID %s in mapping file %s not found in PRS matrix", prs_id.c_str(), sample_mapf.c_str());
             }
             if ( it_phe == pheno_matrix.samp_id2idx.end() ) {
+                if ( dropped_samp_ids.find(phe_id) != dropped_samp_ids.end() ) {
+                    ++n_skipped_dropped; // sample was dropped because of missing covariates
+                    continue;
+                }
                 error("Phenotype trait ID %s in mapping file %s not found in phenotype matrix", phe_id.c_str(), sample_mapf.c_str());
             }
             matching_prs_samp_indices.push_back( it_prs->second );
             matching_pheno_samp_indices.push_back( it_phe->second );
             samp_idx_pheno2prs[it_phe->second] = it_prs->second;
+        }
+        if ( n_skipped_dropped > 0 ) {
+            notice("Skipped %d entries in the sample ID mapping file whose phenotype samples were dropped due to missing covariates", n_skipped_dropped);
         }
         notice("Found %d overlapping samples between PRS and phenotype matrices based on sample ID mapping file", (int32_t)matching_pheno_samp_indices.size());
     }
@@ -324,37 +390,53 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         notice("Found %d overlapping samples between PRS and phenotype matrices based on sample IDs", (int32_t)matching_pheno_samp_indices.size());
     }
 
-    // standardize each trait
+    const int32_t n_traits = (int32_t)pheno_matrix.pheno_ids.size();
+    const int32_t n_pheno_samples = (int32_t)pheno_matrix.samp_ids.size();
+    const int32_t n_prs_samples = (int32_t)prs_matrix.samp_ids.size();
+    const bool pheno_has_missing = pheno_matrix.has_missing;
+
+    // standardize each trait. For phenotypes, mean/sd are computed from observed values only and
+    // missing cells are set to exactly 0 so that they contribute nothing to any inner product below.
     notice("Standardizing PRS and phenotype matrices");
     standardize_matrix_columns_inplace(prs_matrix.pheno_mat);
-    standardize_matrix_columns_inplace(pheno_matrix.pheno_mat);
+    if ( pheno_has_missing ) {
+        standardize_matrix_columns_inplace(pheno_matrix.pheno_mat, pheno_matrix.pheno_mask);
+    }
+    else {
+        standardize_matrix_columns_inplace(pheno_matrix.pheno_mat);
+    }
 
     // for PRS X, and phenotype Y, compute column-wise correlation between X and Y
-    Eigen::VectorXd weights( pheno_matrix.pheno_ids.size() );
+    Eigen::VectorXd weights( n_traits );
     if ( weightf.empty() ) {
         notice("Computing weights for each phenotype");
-        //Eigen::VectorXd weights = columnwise_dot(prs_matrix.pheno_mat, pheno_matrix.pheno_mat) / (double)n_overlapping_samples;
-        for(int32_t i=0; i < pheno_matrix.pheno_ids.size(); ++i) {
+        std::vector<int32_t> n_obs_per_trait( n_traits, 0 );
+        for(int32_t i=0; i < n_traits; ++i) {
             double r = 0;
+            int32_t n_obs = 0;
             for(int32_t j=0; j < matching_pheno_samp_indices.size(); ++j) {
-                r += prs_matrix.pheno_mat( matching_prs_samp_indices[j], i ) * pheno_matrix.pheno_mat( matching_pheno_samp_indices[j], i );
+                int32_t pi = matching_pheno_samp_indices[j];
+                if ( !pheno_matrix.pheno_mask( pi, i ) ) continue; // ignore samples with missing phenotype
+                r += prs_matrix.pheno_mat( matching_prs_samp_indices[j], i ) * pheno_matrix.pheno_mat( pi, i );
+                ++n_obs;
             }
-            weights[i] = r / (double)matching_pheno_samp_indices.size();
+            n_obs_per_trait[i] = n_obs;
+            weights[i] = ( n_obs > 0 ) ? r / (double)n_obs : 0.0;
         }
 
         htsFile* wf = hts_open((outf + ".weights.tsv.gz").c_str(), "wz");
         if ( wf == NULL ) {
             error("Cannot open output file %s.weights.tsv for writing", outf.c_str());
         }
-        hprintf(wf, "Trait\tWeight\n");
+        hprintf(wf, "Trait\tWeight\tN.Obs\n");
         for ( int32_t i = 0; i < weights.size(); ++i) {
-            hprintf(wf, "%s\t%.6f\n", pheno_matrix.pheno_ids[i].c_str(), weights[i]);
+            hprintf(wf, "%s\t%.6f\t%d\n", pheno_matrix.pheno_ids[i].c_str(), weights[i], n_obs_per_trait[i]);
         }
         hts_close(wf);
     }
     else {
         notice("Using provided weights for each phenotype from %s", weightf.c_str());
-        for(int32_t i=0; i < pheno_matrix.pheno_ids.size(); ++i) {
+        for(int32_t i=0; i < n_traits; ++i) {
             std::map<std::string, double>::const_iterator it = phe_weights.find( pheno_matrix.pheno_ids[i] );
             if ( it == phe_weights.end() ) {
                 notice("No weight found for phenotype %s in weights file %s, setting weight to 0", pheno_matrix.pheno_ids[i].c_str(), weightf.c_str());
@@ -378,13 +460,30 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     }
     notice("%d / %zu phenotypes passed the minimum weight threshold of %.4f", n_pass_weights, weights.size(), min_weight);
 
+    // number of observed traits with non-zero weight per phenotyped individual
+    // TODO: a minimum number of observed traits per individual (and observed samples per trait) is a planned option
+    std::vector<int32_t> n_traits_obs( n_pheno_samples, 0 );
+    int32_t n_no_obs_traits = 0;
+    for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
+        int32_t c = 0;
+        for ( int32_t k = 0; k < n_traits; ++k ) {
+            if ( weights[k] != 0.0 && pheno_matrix.pheno_mask(i, k) ) ++c;
+        }
+        n_traits_obs[i] = c;
+        if ( c == 0 ) ++n_no_obs_traits;
+    }
+    if ( n_no_obs_traits > 0 ) {
+        notice("%d phenotyped individuals have no observed traits with non-zero weight and will be reported as NO_OBS_TRAITS", n_no_obs_traits);
+    }
+
     // calculate all pair weighted correlations [n_prs x n_pheno] matrix
     Eigen::MatrixXd all_pair_wcor;
     if ( use_mahalanobis ) {
         notice("Using Mahalanobis distance for matching to account for correlation between traits (may take much longer time)");
         notice("Computing PRS covariance matrix");
         Eigen::MatrixXd prs_cov = prs_matrix.pheno_mat.transpose() * prs_matrix.pheno_mat / (double)prs_matrix.pheno_mat.rows();
-        notice("Computing phenotype covariance matrix");
+        // With missing phenotypes, standardized missing cells are 0, so this is a mean-imputed covariance estimate
+        notice("Computing phenotype covariance matrix%s", pheno_has_missing ? " (missing values mean-imputed)" : "");
         Eigen::MatrixXd pheno_cov = pheno_matrix.pheno_mat.transpose() * pheno_matrix.pheno_mat / (double)pheno_matrix.pheno_mat.rows();
         notice("Comptuing total covariance matrix");
         Eigen::MatrixXd total_cov = weight_prs_mh * prs_cov + (1.0 - weight_prs_mh) * pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
@@ -411,36 +510,71 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         Eigen::MatrixXd W_sqrt = weights.cwiseSqrt().asDiagonal();
         Eigen::MatrixXd M = W_sqrt * total_cov_inv * W_sqrt;
 
+        // YM(i,.) = y_i^T M restricted to the traits observed for individual i. Because missing cells of Y are 0,
+        // masking YM restricts the quadratic form to the observed block M_OO on both sides:
+        //   numerator(j,i) = sum_{k,l in O_i} x_jk M_kl y_il
         notice("Computing numerator for all pair weighted correlations between PRS traits and phenotypes");
-        Eigen::MatrixXd numerator = prs_matrix.pheno_mat * M * pheno_matrix.pheno_mat.transpose();
+        Eigen::MatrixXd YM = pheno_matrix.pheno_mat * M;  // n_pheno x p
+        if ( pheno_has_missing ) {
+            YM = YM.cwiseProduct( pheno_matrix.pheno_mask.cast<double>() );
+        }
+        Eigen::MatrixXd numerator = prs_matrix.pheno_mat * YM.transpose();  // n_prs x n_pheno
 
         notice("Computing norms for PRS and phenotype matrices");
-        Eigen::VectorXd prs_norms = (prs_matrix.pheno_mat * M * prs_matrix.pheno_mat.transpose()).diagonal().cwiseSqrt();
-        Eigen::VectorXd pheno_norms = (pheno_matrix.pheno_mat * M * pheno_matrix.pheno_mat.transpose()).diagonal().cwiseSqrt();
+        // phenotype norms: sqrt( y_iO^T M_OO y_iO )
+        Eigen::VectorXd pheno_norms = YM.cwiseProduct( pheno_matrix.pheno_mat ).rowwise().sum().cwiseSqrt();
+        // PRS norms using all traits: sqrt( x_j^T M x_j ). This is the approximation used for all phenotyped
+        // individuals unless --mh-exact-norm is set.
+        Eigen::VectorXd prs_norms = ( prs_matrix.pheno_mat * M ).cwiseProduct( prs_matrix.pheno_mat ).rowwise().sum().cwiseSqrt();
 
-        // 4. Compute Correlation Matrix
-        // Divide numerator(i, j) by (prs_norm(i) * pheno_norm(j))
-        // Using broadcasting or a loop (Eigen broadcasting can be tricky, loop is safe)
         all_pair_wcor.resize(numerator.rows(), numerator.cols());
         notice("Computing all pair weighted correlations between PRS traits and phenotypes");
-        for (int i = 0; i < numerator.rows(); ++i) {
-            for (int j = 0; j < numerator.cols(); ++j) {
-                double denom = prs_norms(i) * pheno_norms(j);
-                all_pair_wcor(i, j) = numerator(i, j) / (denom + 1e-100);
+        for (int32_t i = 0; i < numerator.cols(); ++i) {
+            all_pair_wcor.col(i) = numerator.col(i).array() / ( ( prs_norms * pheno_norms(i) ).array() + 1e-100 );
+        }
+
+        if ( mh_exact_norm && pheno_has_missing ) {
+            // group phenotyped individuals by missingness pattern and recompute PRS norms as sqrt( x_jO^T M_OO x_jO )
+            std::map<std::string, std::vector<int32_t> > pattern2indices;
+            for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
+                if ( pheno_matrix.pheno_mask.row(i).all() ) continue; // full-trait norm is already exact
+                std::string key( n_traits, '0' );
+                for ( int32_t k = 0; k < n_traits; ++k ) if ( pheno_matrix.pheno_mask(i, k) ) key[k] = '1';
+                pattern2indices[key].push_back(i);
+            }
+            notice("Computing exact PRS norms for %d unique missingness patterns among phenotyped individuals with missing values (--mh-exact-norm)", (int32_t)pattern2indices.size());
+            int32_t n_done = 0;
+            for ( std::map<std::string, std::vector<int32_t> >::const_iterator it = pattern2indices.begin(); it != pattern2indices.end(); ++it ) {
+                std::vector<int32_t> obs;
+                for ( int32_t k = 0; k < n_traits; ++k ) if ( it->first[k] == '1' ) obs.push_back(k);
+                if ( obs.empty() ) continue; // no observed traits: numerator is zero anyway
+                Eigen::MatrixXd X_O = prs_matrix.pheno_mat( Eigen::placeholders::all, obs );
+                Eigen::MatrixXd M_OO = M( obs, obs );
+                Eigen::VectorXd norms_O = ( X_O * M_OO ).cwiseProduct( X_O ).rowwise().sum().cwiseSqrt();
+                for ( size_t t = 0; t < it->second.size(); ++t ) {
+                    int32_t i = it->second[t];
+                    all_pair_wcor.col(i) = numerator.col(i).array() / ( ( norms_O * pheno_norms(i) ).array() + 1e-100 );
+                }
+                if ( ( ++n_done % 100 ) == 0 ) notice("Processed %d / %d missingness patterns", n_done, (int32_t)pattern2indices.size());
             }
         }
-        //notice("Computing all pair Mahalanobis distances between PRS traits and phenotypes");
-        //all_pair_wcor = ( prs_matrix.pheno_mat * ( ( W_sqrt * total_cov_inv * W_sqrt ) * pheno_matrix.pheno_mat.transpose() ) ) / ( weights.array().abs().sum() + 1e-100 );
-
-        // notice("Computing difference between PRS and phenotype matrices");
-        // Eigen::MatrixXd diff_mat = prs_matrix.pheno_mat - pheno_matrix.pheno_mat;
-
-        // notice("Computing all pair Mahalanobis distances between PRS traits and phenotypes");
-        // all_pair_wcor =  -1 * ( diff_mat * ( ( total_cov_inv * weights.asDiagonal() ) * diff_mat.transpose() ) );
     }
     else {
         notice("Computing all pair weighted correlations between PRS traits and phenotypes assuming independence");
-        all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() ) / ( weights.array().abs().sum() + 1e-100 );
+        // missing phenotype cells are 0, so they drop out of the numerator; the denominator is the sum of
+        // absolute weights over the traits observed for each phenotyped individual
+        all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() );
+        Eigen::VectorXd abs_weights = weights.cwiseAbs();
+        Eigen::VectorXd denom;
+        if ( pheno_has_missing ) {
+            denom = pheno_matrix.pheno_mask.cast<double>() * abs_weights;
+        }
+        else {
+            denom = Eigen::VectorXd::Constant( n_pheno_samples, abs_weights.sum() );
+        }
+        for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
+            all_pair_wcor.col(i) /= ( denom(i) + 1e-100 );
+        }
     }
 
     notice("Standardizing all pair weighted correlation matrix");
@@ -460,22 +594,35 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     }
  
     // write the header line
-    hprintf(wf1, "ID.Pheno\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\n");
-    hprintf(wf2, "ID.Pheno\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\tID.1st\tZ.1st\tCOR.1st\tID.2nd\tZ.2nd\tCOR.2nd\tID.3rd\tZ.3rd\tCOR.3rd\tID.4th\tZ.4th\tCOR.4th\tID.5th\tZ.5th\tCOR.5th\n");
-    for ( int32_t i = 0; i < pheno_matrix.samp_ids.size(); ++i ) {
-        // find the best and second best matches
-        //notice("foo %d", i); 
+    hprintf(wf1, "ID.Pheno\tN.Traits\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\n");
+    hprintf(wf2, "ID.Pheno\tN.Traits\tMatchStatus\tID.self\tZ.self\tCOR.self\tRank.self\tID.1st\tZ.1st\tCOR.1st\tID.2nd\tZ.2nd\tCOR.2nd\tID.3rd\tZ.3rd\tCOR.3rd\tID.4th\tZ.4th\tCOR.4th\tID.5th\tZ.5th\tCOR.5th\n");
+    for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
         int32_t self_idx = -1;
         if ( samp_idx_pheno2prs.find(i) != samp_idx_pheno2prs.end() ) {
             self_idx = samp_idx_pheno2prs[i];
         }
+
+        // individuals without any observed trait cannot be scored
+        if ( n_traits_obs[i] == 0 ) {
+            if ( self_idx >= 0 ) {
+                hprintf(wf1, "%s\t0\tNO_OBS_TRAITS\t%s\tNA\tNA\tNA\n",
+                    pheno_matrix.samp_ids[i].c_str(), prs_matrix.samp_ids[self_idx].c_str());
+            }
+            hprintf(wf2, "%s\t0\tNO_OBS_TRAITS\t%s\tNA\tNA\tNA",
+                pheno_matrix.samp_ids[i].c_str(), self_idx >= 0 ? prs_matrix.samp_ids[self_idx].c_str() : "NA");
+            for ( int32_t k = 0; k < 5; ++k ) hprintf(wf2, "\tNA\tNA\tNA");
+            hprintf(wf2, "\n");
+            continue;
+        }
+
+        // find the best and second best matches
         int32_t self_rank = 1;
         double z_self = self_idx >=0 ? all_pair_z(self_idx, i) : -9999.0;
         double cor_self = self_idx >=0 ? all_pair_wcor(self_idx, i) : -9999.0;
         double idx_top[5] = { -1, -1, -1, -1, -1 };
         double z_top[5] = { -9999.0, -9999.0, -9999.0, -9999.0, -9999.0 };
         double cor_top[5] = { -9999.0, -9999.0, -9999.0, -9999.0, -9999.0 };
-        for( int32_t j = 0; j < prs_matrix.samp_ids.size(); ++j ) {
+        for( int32_t j = 0; j < n_prs_samples; ++j ) {
             double z = all_pair_z(j, i);
             double cor = all_pair_wcor(j, i);
             if ( self_idx >= 0 && j != self_idx && z > z_self ) {
@@ -499,8 +646,9 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         }
         if ( self_idx >= 0 ) {
             const char* match_status = ( self_rank == 1 ? "BEST_MATCH" : ( z_self < z_lenient_threshold ? "NO_MATCH" : "LENIENT_MATCH" ) );
-            hprintf(wf1, "%s\t%s\t%s\t%.6f\t%.6f\t%d\n",
+            hprintf(wf1, "%s\t%d\t%s\t%s\t%.6f\t%.6f\t%d\n",
                 pheno_matrix.samp_ids[i].c_str(),
+                n_traits_obs[i],
                 match_status,
                 prs_matrix.samp_ids[self_idx].c_str(),
                 z_self, cor_self,
@@ -525,16 +673,18 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
             }
         }
         if ( self_idx >= 0 ) {
-            hprintf(wf2, "%s\t%s\t%s\t%.6f\t%.6f\t%d",
+            hprintf(wf2, "%s\t%d\t%s\t%s\t%.6f\t%.6f\t%d",
                 pheno_matrix.samp_ids[i].c_str(),
+                n_traits_obs[i],
                 match_status,
                 prs_matrix.samp_ids[self_idx].c_str(),
                 z_self, cor_self,
                 self_rank);
         }
         else {
-            hprintf(wf2, "%s\t%s\tNA\tNA\tNA\tNA",
+            hprintf(wf2, "%s\t%d\t%s\tNA\tNA\tNA\tNA",
                 pheno_matrix.samp_ids[i].c_str(),
+                n_traits_obs[i],
                 match_status);
         }
         for ( int32_t k = 0; k < 5; ++k ) {
@@ -553,7 +703,6 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     hts_close(wf1); // close the output file
     hts_close(wf2); // close the output file
 
- 
     notice("Analysis finished");
     return 0;
 }

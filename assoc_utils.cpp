@@ -107,6 +107,136 @@ Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values,
     return values - (C_aug * beta);
 }
 
+void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix,
+                                        const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask) {
+    const long n_cols = matrix.cols();
+    const long n_rows = matrix.rows();
+    if ( mask.rows() != n_rows || mask.cols() != n_cols ) {
+        error("standardize_matrix_columns_inplace: mask dimensions (%ld x %ld) do not match matrix dimensions (%ld x %ld)",
+              (long)mask.rows(), (long)mask.cols(), n_rows, n_cols);
+    }
+
+    notice("Standardizing columns of matrix with dimensions %ld x %ld using observed values only.", n_rows, n_cols);
+
+    for (long j = 0; j < n_cols; ++j) {
+        // two-pass mean / sd over observed cells
+        double sum = 0.0;
+        long n_obs = 0;
+        for (long i = 0; i < n_rows; ++i) {
+            if ( mask(i, j) ) { sum += matrix(i, j); ++n_obs; }
+        }
+        if ( n_obs < 2 ) {
+            matrix.col(j).setZero();
+            continue;
+        }
+        const double mean = sum / (double)n_obs;
+        double ss = 0.0;
+        for (long i = 0; i < n_rows; ++i) {
+            if ( mask(i, j) ) { double d = matrix(i, j) - mean; ss += d * d; }
+        }
+        const double stddev = std::sqrt(ss / (double)(n_obs - 1));
+        if ( stddev > 0 ) {
+            for (long i = 0; i < n_rows; ++i) {
+                matrix(i, j) = mask(i, j) ? (matrix(i, j) - mean) / stddev : 0.0;
+            }
+        }
+        else {
+            matrix.col(j).setZero();
+        }
+    }
+}
+
+Eigen::MatrixXd pheno_adj_cov_nxt_with_missing(const Eigen::MatrixXd& values,
+                                               const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask,
+                                               const Eigen::MatrixXd& covariates) {
+    const long n = values.rows();
+    const long g = values.cols();
+    const long p = covariates.cols();
+
+    if ( n != covariates.rows() ) {
+        throw std::runtime_error("Value and covariate matrices must have the same number of rows (observations).");
+    }
+    if ( mask.rows() != n || mask.cols() != g ) {
+        throw std::runtime_error("Value matrix and mask must have the same dimensions.");
+    }
+
+    Eigen::MatrixXd C_aug(n, p + 1);
+    C_aug.col(0).setOnes();
+    C_aug.rightCols(p) = covariates;
+
+    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(n, g);
+
+    // split traits into complete and incomplete columns
+    std::vector<long> complete_cols, incomplete_cols;
+    for (long j = 0; j < g; ++j) {
+        if ( mask.col(j).all() ) complete_cols.push_back(j);
+        else incomplete_cols.push_back(j);
+    }
+    notice("Adjusting %ld complete traits in batch and %ld traits with missing values individually",
+           (long)complete_cols.size(), (long)incomplete_cols.size());
+
+    // complete traits: one QR decomposition shared across all of them
+    if ( !complete_cols.empty() ) {
+        Eigen::MatrixXd V(n, (long)complete_cols.size());
+        for (size_t k = 0; k < complete_cols.size(); ++k) V.col(k) = values.col(complete_cols[k]);
+        Eigen::MatrixXd beta = C_aug.colPivHouseholderQr().solve(V);
+        Eigen::MatrixXd R = V - C_aug * beta;
+        for (size_t k = 0; k < complete_cols.size(); ++k) result.col(complete_cols[k]) = R.col(k);
+    }
+
+    // incomplete traits: regress on observed rows only
+    int32_t n_underdetermined = 0;
+    for (size_t k = 0; k < incomplete_cols.size(); ++k) {
+        const long j = incomplete_cols[k];
+        std::vector<long> obs_rows;
+        obs_rows.reserve(n);
+        for (long i = 0; i < n; ++i) if ( mask(i, j) ) obs_rows.push_back(i);
+        const long n_obs = (long)obs_rows.size();
+        if ( n_obs <= p + 1 ) {
+            // too few observations to fit the covariate model; leave residuals at zero so that the
+            // trait becomes constant and receives zero weight downstream
+            ++n_underdetermined;
+            continue;
+        }
+        Eigen::MatrixXd C_obs(n_obs, p + 1);
+        Eigen::VectorXd y_obs(n_obs);
+        for (long r = 0; r < n_obs; ++r) {
+            C_obs.row(r) = C_aug.row(obs_rows[r]);
+            y_obs(r) = values(obs_rows[r], j);
+        }
+        Eigen::VectorXd beta = C_obs.colPivHouseholderQr().solve(y_obs);
+        Eigen::VectorXd resid = y_obs - C_obs * beta;
+        for (long r = 0; r < n_obs; ++r) result(obs_rows[r], j) = resid(r);
+    }
+    if ( n_underdetermined > 0 ) {
+        warning("%d traits had no more observed values than covariates (plus intercept) and were set to zero residuals",
+                n_underdetermined);
+    }
+    return result;
+}
+
+Eigen::MatrixXd rint_matrix_with_missing(const Eigen::MatrixXd& matrix,
+                                         const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask) {
+    const int32_t n_rows = matrix.rows();
+    const int32_t n_cols = matrix.cols();
+    if ( mask.rows() != n_rows || mask.cols() != n_cols ) {
+        throw std::invalid_argument("rint_matrix_with_missing: matrix and mask must have the same dimensions.");
+    }
+    Eigen::MatrixXd result(n_rows, n_cols);
+    for (int32_t j = 0; j < n_cols; ++j) {
+        if ( mask.col(j).all() ) {
+            result.col(j) = rint_without_missing(matrix.col(j));
+        }
+        else {
+            Eigen::VectorXd r = rint_with_missing(matrix.col(j), mask.col(j));
+            for (int32_t i = 0; i < n_rows; ++i) {
+                result(i, j) = mask(i, j) ? r(i) : 0.0;
+            }
+        }
+    }
+    return result;
+}
+
 void center_rows(Eigen::MatrixXd &matrix) {
     // We iterate over each row of the matrix.
     // The .rowwise() method allows us to apply an operation to each row.

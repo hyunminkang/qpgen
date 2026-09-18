@@ -138,6 +138,12 @@ Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const 
 
 Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
 
+// Covariate adjustment when some phenotype values are missing. Each trait is regressed on the covariates
+// using only its observed rows; residuals are returned for observed cells and missing cells are set to 0.
+Eigen::MatrixXd pheno_adj_cov_nxt_with_missing(const Eigen::MatrixXd& values,
+                                               const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask,
+                                               const Eigen::MatrixXd& covariates);
+
 void center_rows(Eigen::MatrixXd &matrix);
 
 // Structure to hold the results of the regression for one variable
@@ -173,7 +179,16 @@ Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values);
 
 Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix);
 
+// Column-wise RINT using only observed cells; missing cells are set to 0 in the output.
+Eigen::MatrixXd rint_matrix_with_missing(const Eigen::MatrixXd& matrix,
+                                         const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask);
+
 void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix);
+
+// Column-wise standardization using mean/sd of observed cells only; missing cells are set to exactly 0
+// so that they contribute nothing to downstream inner products.
+void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix,
+                                        const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask);
 
 Eigen::VectorXd columnwise_dot(const Eigen::MatrixXd& mat1, const Eigen::MatrixXd& mat2);
 
