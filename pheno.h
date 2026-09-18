@@ -45,6 +45,10 @@ public:
     }
     // refresh has_missing from the current mask (e.g. after subsetting samples or phenotypes)
     void recompute_has_missing() { has_missing = ( pheno_mask.size() > 0 ) && !pheno_mask.all(); }
+    // impute missing cells column-wise with the mean (as_min=false) or the minimum (as_min=true) of the observed
+    // values, mark them observed, and refresh has_missing. Columns with no observed value are left missing.
+    // Returns the number of imputed cells.
+    int64_t impute_missing(bool as_min);
     
     bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\0');
     int32_t subset_sample_ids(const std::vector<std::string>& samp_ids);

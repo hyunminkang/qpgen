@@ -202,6 +202,37 @@ int32_t PhenoMatrix::subset_pheno_ids(const std::vector<std::string>& pheno_ids)
     return subset_pheno_indices( phe_pheno_indices );
 }
 
+int64_t PhenoMatrix::impute_missing(bool as_min) {
+    int64_t n_imputed = 0;
+    int32_t n_cols_all_missing = 0;
+    for ( int32_t j = 0; j < pheno_mat.cols(); ++j ) {
+        double sum = 0.0, minv = 0.0;
+        int32_t n_obs = 0;
+        for ( int32_t i = 0; i < pheno_mat.rows(); ++i ) {
+            if ( !pheno_mask(i, j) ) continue;
+            double v = pheno_mat(i, j);
+            if ( n_obs == 0 || v < minv ) minv = v;
+            sum += v;
+            ++n_obs;
+        }
+        if ( n_obs == 0 ) { ++n_cols_all_missing; continue; }
+        if ( n_obs == pheno_mat.rows() ) continue;
+        double fill = as_min ? minv : sum / (double)n_obs;
+        for ( int32_t i = 0; i < pheno_mat.rows(); ++i ) {
+            if ( !pheno_mask(i, j) ) {
+                pheno_mat(i, j) = fill;
+                pheno_mask(i, j) = true;
+                ++n_imputed;
+            }
+        }
+    }
+    if ( n_cols_all_missing > 0 ) {
+        warning("%d phenotypes have no observed values and were left missing", n_cols_all_missing);
+    }
+    recompute_has_missing();
+    return n_imputed;
+}
+
 bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim) {
     format.assign(pheno_format);
     if ( format.compare("regenie") == 0 ||

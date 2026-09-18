@@ -82,11 +82,16 @@ nav:
     - rect-assoc: tools/rect_assoc.md
     - region-assoc: tools/region_assoc.md
     - match-prs-pheno: tools/match_prs_pheno.md
+    - match-prs-pheno methods: tools/match_prs_pheno_methods.md
     - match-plp-geno: tools/match_plp_geno.md
     - join-plp-geno: tools/join_plp_geno.md
     - geno2tsv: tools/geno2tsv.md
     - pgen2tsv: tools/pgen2tsv.md
   
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 markdown_extensions:
   - admonition
   # - abbr

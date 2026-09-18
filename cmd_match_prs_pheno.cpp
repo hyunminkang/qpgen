@@ -13,90 +13,125 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
-struct ShrinkageMinimizer {
-    Eigen::MatrixXd MN;          // (M elementwise-product N), p x p
-    Eigen::VectorXd d;           // eigenvalues, length p
-    Eigen::VectorXd oneMinusD;   // 1 - d_i, length p
+// For a diagonal metric diag(w), the exact PRS norm of candidate j over the traits observed for phenotyped sample i is
+// sqrt( sum_{k in O_i} w_k x_jk^2 ) = sqrt( (X.^2 diag(w) mask^T)(j,i) ). This divides S(j,i) by that norm times
+// pheno_norms(i), processing phenotyped samples in blocks to bound memory.
+static void divide_by_exact_diagonal_norms(Eigen::MatrixXd& S, const Eigen::MatrixXd& X, const Eigen::VectorXd& w,
+                                           const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask,
+                                           const Eigen::VectorXd& pheno_norms) {
+    Eigen::MatrixXd X2W = X.cwiseAbs2() * w.asDiagonal();          // n_x x p
+    const int32_t block = 512;
+    for ( int32_t c0 = 0; c0 < S.cols(); c0 += block ) {
+        const int32_t b = std::min(block, (int32_t)S.cols() - c0);
+        Eigen::MatrixXd maskd = mask.middleRows(c0, b).cast<double>();   // b x p
+        Eigen::MatrixXd nrm = ( X2W * maskd.transpose() ).cwiseSqrt();  // n_x x b
+        for ( int32_t c = 0; c < b; ++c ) {
+            S.col(c0 + c) = S.col(c0 + c).array() / ( nrm.col(c).array() * pheno_norms(c0 + c) + 1e-100 );
+        }
+    }
+}
 
-    ShrinkageMinimizer(const Eigen::MatrixXd& X,
-                       const Eigen::MatrixXd& Y,
-                       const Eigen::MatrixXd& U,
-                       const Eigen::VectorXd& d_)
-        : d(d_),
-          oneMinusD(Eigen::VectorXd::Ones(d_.size()) - d_)
+// Tunes the shrinkage parameter lambda of the Mahalanobis metric using the phenotyped samples that have a
+// mapped PRS sample. For a candidate lambda, the mapped samples are scored against all PRS samples exactly as
+// in the main analysis, and a separation criterion of the self match is computed:
+//   mean-log-softmax : mean over mapped samples of log( exp(Z_self) / sum_j exp(Z_j) )  (default)
+//   mean-z           : mean over mapped samples of Z_self
+//   mrr              : mean over mapped samples of 1 / rank of the self match
+// The criterion is maximized over [0,1] by golden-section search.
+struct LambdaTuner {
+    const Eigen::MatrixXd& total_cov;
+    const Eigen::MatrixXd& X;          // standardized PRS matrix (n_prs x p)
+    Eigen::MatrixXd Ymap;              // standardized phenotypes of mapped samples (n_map x p)
+    Eigen::MatrixXd maskmap;           // 0/1 mask of Ymap (n_map x p), used only when has_missing
+    bool has_missing;
+    Eigen::VectorXd wsqrt;             // sqrt of trait weights
+    std::vector<int32_t> self_rows;    // PRS row index of the self match for each column of Ymap
+    std::string metric;
+    int32_t n_eval;
+    int32_t last_n_self_best;          // number of self matches ranked first in the last evaluation
+
+    LambdaTuner(const Eigen::MatrixXd& total_cov_, const Eigen::MatrixXd& X_,
+                const Eigen::MatrixXd& Y, const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& mask,
+                bool has_missing_, const Eigen::VectorXd& weights,
+                const std::vector<int32_t>& prs_idx, const std::vector<int32_t>& pheno_idx,
+                const std::vector<int32_t>& n_traits_obs, const std::string& metric_, int32_t min_self)
+        : total_cov(total_cov_), X(X_), has_missing(has_missing_), wsqrt(weights.cwiseSqrt()), metric(metric_), n_eval(0), last_n_self_best(0)
     {
-        const Eigen::MatrixXd A = X * U;                          // n x p
-        const Eigen::MatrixXd B = U.transpose() * Y.transpose();  // p x m
-        const Eigen::MatrixXd M = A.transpose() * A;              // p x p (sym)
-        const Eigen::MatrixXd N = B * B.transpose();              // p x p (sym)
-        MN.noalias() = M.cwiseProduct(N);
+        std::vector<int32_t> keep;
+        for ( size_t k = 0; k < pheno_idx.size(); ++k ) {
+            if ( n_traits_obs[pheno_idx[k]] > 0 ) keep.push_back((int32_t)k);
+        }
+        if ( (int32_t)keep.size() < std::max(min_self, 1) ) {
+            error("--auto-lambda: only %d phenotyped samples have a mapped PRS sample and observed traits, fewer than --auto-lambda-min-self %d. Check the sample IDs or --sample-tsv mapping, set --lambda manually, or lower --auto-lambda-min-self",
+                  (int32_t)keep.size(), min_self);
+        }
+        notice("--auto-lambda will tune on %d mapped samples", (int32_t)keep.size());
+        Ymap.resize(keep.size(), Y.cols());
+        maskmap.resize(has_missing ? (int32_t)keep.size() : 0, has_missing ? Y.cols() : 0);
+        for ( size_t r = 0; r < keep.size(); ++r ) {
+            Ymap.row(r) = Y.row(pheno_idx[keep[r]]);
+            if ( has_missing ) maskmap.row(r) = mask.row(pheno_idx[keep[r]]).cast<double>();
+            self_rows.push_back(prs_idx[keep[r]]);
+        }
+        if ( metric != "mean-log-softmax" && metric != "mean-z" && metric != "mrr" ) {
+            error("Unknown --auto-lambda-metric '%s'. Options: mean-log-softmax, mean-z, mrr", metric.c_str());
+        }
     }
 
-    // f(lambda) = ||X U ((1-lambda)D + lambda I)^{-1} U^T Y^T||_F^2
-    double squaredNorm(double lambda) const {
-        Eigen::VectorXd g = d + lambda * oneMinusD;          // (1-l)d + l
-        if ((g.array() <= 0.0).any())
-            return std::numeric_limits<double>::infinity();
-        Eigen::VectorXd w = g.cwiseInverse();
-        double sqnorm = w.dot(MN * w);
-        notice("Evaluating squaredNorm at lambda = %g: sqnorm = %g, min(g) = %g, max(g) = %g, min(w) = %g, max(w) = %g", lambda, sqnorm, g.minCoeff(), g.maxCoeff(), w.minCoeff(), w.maxCoeff());
-        return sqnorm;
-    }
-
-    // Golden-section search on [a, b]. Assumes f is unimodal on the interval
-    // (typically true when d_i >= 0 and search range is [0, 1]).
-    double findOptimalLambda(double a = 0.0, double b = 1.0,
-                             double tol = 1e-9, int maxIter = 200) const {
-        const double phi = (std::sqrt(5.0) - 1.0) / 2.0;  // ~0.6180339887
-        double x1 = b - phi * (b - a);
-        double x2 = a + phi * (b - a);
-        double f1 = squaredNorm(x1);
-        double f2 = squaredNorm(x2);
-
-        for (int i = 0; i < maxIter && (b - a) > tol; ++i) {
-            if (f1 < f2) {
-                b  = x2;
-                x2 = x1;          f2 = f1;
-                x1 = b - phi * (b - a);
-                f1 = squaredNorm(x1);
-            } else {
-                a  = x1;
-                x1 = x2;          f1 = f2;
-                x2 = a + phi * (b - a);
-                f2 = squaredNorm(x2);
+    double evaluate(double lambda) {
+        const int32_t p = total_cov.rows();
+        Eigen::MatrixXd tot = (1.0 - lambda) * total_cov + lambda * Eigen::MatrixXd::Identity(p, p);
+        Eigen::MatrixXd M = wsqrt.asDiagonal() * tot.inverse() * wsqrt.asDiagonal();
+        Eigen::MatrixXd YM = Ymap * M;
+        if ( has_missing ) YM = YM.cwiseProduct(maskmap);
+        Eigen::MatrixXd S = X * YM.transpose();                                       // n_prs x n_map
+        Eigen::VectorXd prs_norms = ( X * M ).cwiseProduct( X ).rowwise().sum().cwiseSqrt();
+        S.array().colwise() /= ( prs_norms.array() + 1e-100 );                         // pheno norm cancels below
+        const int32_t n = S.rows();
+        double total = 0.0;
+        int32_t n_self_best = 0;
+        for ( int32_t c = 0; c < S.cols(); ++c ) {
+            Eigen::VectorXd col = S.col(c);
+            double mean = col.mean();
+            double sd = std::sqrt( (col.array() - mean).square().sum() / (double)(n - 1) );
+            if ( sd <= 0 ) continue;
+            Eigen::ArrayXd z = (col.array() - mean) / sd;
+            double z_self = z(self_rows[c]);
+            if ( (z > z_self).count() == 0 ) ++n_self_best;
+            if ( metric == "mean-z" ) {
+                total += z_self;
             }
+            else if ( metric == "mrr" ) {
+                int32_t rank = 1 + (int32_t)(z > z_self).count();
+                total += 1.0 / (double)rank;
+            }
+            else { // mean-log-softmax
+                double zmax = z.maxCoeff();
+                double lse = zmax + std::log( (z - zmax).exp().sum() );
+                total += z_self - lse;
+            }
+        }
+        ++n_eval;
+        last_n_self_best = n_self_best;
+        double value = total / (double)S.cols();
+        notice("  auto-lambda evaluation %d: lambda = %.4f, %s = %.6f, self-best = %d / %d", n_eval, lambda, metric.c_str(), value, n_self_best, (int32_t)S.cols());
+        return value;
+    }
+
+    // golden-section maximization on [a, b]
+    double findOptimalLambda(double a = 0.0, double b = 1.0, double tol = 0.01) {
+        const double phi = (std::sqrt(5.0) - 1.0) / 2.0;
+        double x1 = b - phi * (b - a), x2 = a + phi * (b - a);
+        double f1 = evaluate(x1), f2 = evaluate(x2);
+        while ( (b - a) > tol ) {
+            if ( f1 > f2 ) { b = x2; x2 = x1; f2 = f1; x1 = b - phi * (b - a); f1 = evaluate(x1); }
+            else           { a = x1; x1 = x2; f1 = f2; x2 = a + phi * (b - a); f2 = evaluate(x2); }
         }
         return 0.5 * (a + b);
     }
 };
-
-double ledoit_wolf_shrinkage_parameter(const Eigen::MatrixXd& total_cov, const Eigen::MatrixXd& prs_mat, const Eigen::MatrixXd& pheno_mat) {
-    int n = prs_mat.rows();
-    int p = prs_mat.cols();
-    if ( ( p != pheno_mat.cols() ) ) {
-        error("PRS and phenotype matrices must have the same dimensions - got %d x %d and %d x %d", (int32_t)prs_mat.rows(), (int32_t)prs_mat.cols(), (int32_t)pheno_mat.rows(), (int32_t)pheno_mat.cols());
-    }
-    if ( ( p != total_cov.rows() ) || ( p != total_cov.cols() ) ) {
-        error("Total covariance matrix must have the same dimensions as the number of traits - got %d x %d", (int32_t)total_cov.rows(), (int32_t)total_cov.cols());
-    }
-
-    // perform Eigendecomposition of the total covariance matrix
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig_solver(total_cov);
-    if ( eig_solver.info() != Eigen::Success ) {
-        error("Failed to perform eigendecomposition of the total covariance matrix");
-    }
-    Eigen::VectorXd eig_vals = eig_solver.eigenvalues();
-    Eigen::MatrixXd eig_vecs = eig_solver.eigenvectors();
-
-    // compute the Ledoit-Wolf shrinkage parameter
-    ShrinkageMinimizer minimizer(prs_mat, pheno_mat, eig_vecs, eig_vals);
-    double lambda = minimizer.findOptimalLambda(0.0, 1.0);
-    double minVal = std::sqrt(minimizer.squaredNorm(lambda));
-    notice("Optimal shrinkage parameter (lambda) found: %g with minimum Frobenius norm: %g", lambda, minVal);
-    return lambda;
-}
-
 
 int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 {
@@ -112,10 +147,16 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     std::string cov_format("regenie");
     std::string missing_str("NA");  // comma-separated strings representing missing values
     bool cov_impute_mean = false;  // mean-impute missing covariates instead of dropping samples
+    bool missing_as_mean = false;  // impute missing phenotypes with the trait mean instead of ignoring them
+    bool missing_as_min = false;   // impute missing phenotypes with the trait minimum (e.g. below detection limit)
     bool rint_after_adj = false;   // Perform rank-based inverse normal transformation after covariate adjustment
     bool use_mahalanobis = false;  // Use Mahalanobis distance for matching
-    bool use_ledoit_wolf = false; // Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance
-    bool mh_exact_norm = false;   // Compute PRS norms exactly per phenotype missingness pattern in Mahalanobis mode
+    bool auto_lambda = false;     // tune the Mahalanobis shrinkage parameter on the mapped samples
+    std::string auto_lambda_metric("mean-log-softmax"); // criterion maximized by --auto-lambda
+    int32_t auto_lambda_min_self = 100;  // minimum number of mapped samples usable for tuning
+    int32_t auto_lambda_min_best = 100;  // minimum number of self-best matches at the tuned lambda
+    bool exact_norm = false;      // compute PRS norms over each phenotyped sample's observed traits instead of all traits
+    bool no_norm = false;         // legacy independence score: inner product divided by total absolute weight, no profile norms
     double min_weight = 0.0;  // minimum weight (in r) per trait to set to zero
     double z_lenient_threshold = 1.96;  // Z-score threshold for lenient matching
     double z_diff_threshold = 2.0;      // Z-score difference to declare a clear match
@@ -142,17 +183,27 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
 
     LONG_PARAM_GROUP("Analysis options", NULL)
-    LONG_PARAM("cov-impute-mean", &cov_impute_mean, "Mean-impute missing covariate values instead of dropping samples with any missing covariate (default: false)")
     LONG_PARAM("rint", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
     LONG_PARAM("mahalanobis", &use_mahalanobis, "Use Mahalanobis distance for matching (default: false)")
-    LONG_PARAM("ledoit-wolf", &use_ledoit_wolf, "Use Ledoit-Wolf shrinkage for covariance estimation when using Mahalanobis distance (default: false)")
-    LONG_PARAM("mh-exact-norm", &mh_exact_norm, "With --mahalanobis, compute PRS norms exactly for each phenotype missingness pattern instead of approximating with all traits (slower when many patterns exist; default: false)")
+    LONG_PARAM("no-norm", &no_norm, "Without --mahalanobis, divide the weighted inner product by the total absolute weight of the observed traits instead of by the weighted norms of the two profiles (legacy score; default: false)")
+    LONG_PARAM("exact-norm", &exact_norm, "When phenotypes have missing values, compute each PRS norm over the traits observed for the phenotyped sample instead of over all traits. One extra matrix product without --mahalanobis or with --lambda 1; one pass per missingness pattern otherwise (default: false)")
     LONG_DOUBLE_PARAM("weight-prs-mh", &weight_prs_mh, "Weight for PRS distance when combining with weighted correlation (default: 0.5)")
     LONG_DOUBLE_PARAM("lambda", &lambda, "Regularization parameter for Mahalanobis distance, between 0 and 1 (default: 0.0)")
     LONG_DOUBLE_PARAM("min-weight", &min_weight, "Minimum weight (in r) per trait to set to zero (default: 0.0)")
     LONG_DOUBLE_PARAM("z-threshold", &z_lenient_threshold, "Z-score threshold for lenient matching (default: 1.96)")
     LONG_DOUBLE_PARAM("z-diff", &z_diff_threshold, "Z-score difference to declare a clear match (default: 2.0)")
     LONG_INT_PARAM("threads", &n_threads, "Number of threads to use (default: 1)")
+
+    LONG_PARAM_GROUP("Imputation options", NULL)
+    LONG_PARAM("cov-impute-mean", &cov_impute_mean, "Mean-impute missing covariate values instead of dropping samples with any missing covariate (default: false)")
+    LONG_PARAM("missing-as-mean", &missing_as_mean, "Impute missing phenotype values with the mean of observed values for the trait, then treat them as observed (default: false, missing values are ignored)")
+    LONG_PARAM("missing-as-min", &missing_as_min, "Impute missing phenotype values with the minimum of observed values for the trait, e.g. for measurements below a detection limit, then treat them as observed (default: false, missing values are ignored)")
+
+    LONG_PARAM_GROUP("Auto-lambda options (with --mahalanobis)", NULL)
+    LONG_PARAM("auto-lambda", &auto_lambda, "Choose the shrinkage parameter lambda automatically by maximizing the separation of the mapped self matches (default: false)")
+    LONG_STRING_PARAM("auto-lambda-metric", &auto_lambda_metric, "Criterion maximized by --auto-lambda (default: 'mean-log-softmax'). Options: 'mean-log-softmax', 'mean-z', 'mrr'")
+    LONG_INT_PARAM("auto-lambda-min-self", &auto_lambda_min_self, "Minimum number of phenotyped samples with a mapped PRS sample and observed traits required for tuning; fewer is an error (default: 100)")
+    LONG_INT_PARAM("auto-lambda-min-best", &auto_lambda_min_best, "Minimum number of mapped samples whose own PRS ranks first at the tuned lambda; fewer is an error, indicating a mismatched sample mapping (default: 100; 0 disables)")
 
     END_LONG_PARAMS();
 
@@ -264,6 +315,16 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         error("Number of phenotypes after subsetting do not match between phenotype and PRS matrices (%d vs %d)", (int32_t)pheno_matrix.pheno_ids.size(), (int32_t)prs_matrix.pheno_ids.size());
     }
     notice("Subsetted to %d overlapping phenotypes between PRS and phenotype matrices", (int32_t)pheno_matrix.pheno_ids.size());
+
+    // optionally impute missing phenotypes so that they are treated as observed downstream
+    if ( missing_as_mean && missing_as_min ) {
+        error("--missing-as-mean and --missing-as-min cannot be used together");
+    }
+    if ( ( missing_as_mean || missing_as_min ) && pheno_matrix.has_missing ) {
+        int64_t n_imputed = pheno_matrix.impute_missing(missing_as_min);
+        notice("Imputed %lld missing phenotype values with the trait %s (%s)", (long long)n_imputed,
+               missing_as_min ? "minimum" : "mean", missing_as_min ? "--missing-as-min" : "--missing-as-mean");
+    }
 
     // samples dropped from the phenotype matrix because of missing covariates
     std::set<std::string> dropped_samp_ids;
@@ -476,6 +537,13 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         notice("%d phenotyped individuals have no observed traits with non-zero weight and will be reported as NO_OBS_TRAITS", n_no_obs_traits);
     }
 
+    if ( no_norm && use_mahalanobis ) {
+        error("--no-norm applies only to the independence score and cannot be combined with --mahalanobis");
+    }
+    if ( !no_norm && weights.minCoeff() < 0 ) {
+        error("Negative trait weights are not allowed when profile norms are used (they arise from --weights or a negative --min-weight). Use --min-weight 0 or higher, or --no-norm");
+    }
+
     // calculate all pair weighted correlations [n_prs x n_pheno] matrix
     Eigen::MatrixXd all_pair_wcor;
     if ( use_mahalanobis ) {
@@ -490,13 +558,21 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         if ( lambda < 0.0 || lambda > 1.0 ) {
             error("Invalid value for lambda: %.4f. Must be between 0 and 1", lambda);
         }
-        if ( use_ledoit_wolf ) {
+        if ( auto_lambda ) {
             if ( lambda > 0 ) {
-                error("Cannot use Ledoit-Wolf shrinkage when lambda is greater than 0. Please set lambda to 0 to use Ledoit-Wolf shrinkage or set lambda to a value between 0 and 1 to use regularization without Ledoit-Wolf shrinkage");
+                error("Cannot use --auto-lambda together with a non-zero --lambda. Set --lambda 0 (default) to tune it automatically");
             }
-            else {
-                lambda = ledoit_wolf_shrinkage_parameter(total_cov, prs_matrix.pheno_mat, pheno_matrix.pheno_mat);
-                notice("Using Ledoit-Wolf shrinkage with lambda = %.4f", lambda);
+            notice("Tuning lambda on %d mapped samples by maximizing %s (--auto-lambda)", (int32_t)matching_pheno_samp_indices.size(), auto_lambda_metric.c_str());
+            LambdaTuner tuner(total_cov, prs_matrix.pheno_mat, pheno_matrix.pheno_mat, pheno_matrix.pheno_mask, pheno_has_missing,
+                              weights, matching_prs_samp_indices, matching_pheno_samp_indices, n_traits_obs, auto_lambda_metric, auto_lambda_min_self);
+            lambda = tuner.findOptimalLambda(0.0, 1.0, 0.01);
+            tuner.evaluate(lambda); // one more pass at the chosen value to report the self-best count
+            int32_t n_tuned = (int32_t)tuner.self_rows.size();
+            notice("Using automatically tuned lambda = %.4f after %d evaluations; %d / %d mapped samples (%.1f%%) rank their own PRS first",
+                   lambda, tuner.n_eval, tuner.last_n_self_best, n_tuned, 100.0 * tuner.last_n_self_best / n_tuned);
+            if ( auto_lambda_min_best > 0 && tuner.last_n_self_best < auto_lambda_min_best ) {
+                error("--auto-lambda: only %d of %d mapped samples rank their own PRS first at the tuned lambda, fewer than --auto-lambda-min-best %d. This usually indicates a mismatched sample mapping (check --sample-tsv or the sample IDs), which also invalidates the trait weights estimated from it. Lower --auto-lambda-min-best or set it to 0 to proceed anyway",
+                      tuner.last_n_self_best, n_tuned, auto_lambda_min_best);
             }
         }
         if ( lambda > 0 ) {
@@ -529,11 +605,19 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
 
         all_pair_wcor.resize(numerator.rows(), numerator.cols());
         notice("Computing all pair weighted correlations between PRS traits and phenotypes");
-        for (int32_t i = 0; i < numerator.cols(); ++i) {
-            all_pair_wcor.col(i) = numerator.col(i).array() / ( ( prs_norms * pheno_norms(i) ).array() + 1e-100 );
+        if ( exact_norm && pheno_has_missing && lambda == 1.0 ) {
+            // M is diagonal (= W) at lambda 1, so exact norms over observed traits are a single matrix product
+            notice("Computing exact PRS norms over observed traits with the diagonal metric at lambda = 1 (--exact-norm)");
+            all_pair_wcor = numerator;
+            divide_by_exact_diagonal_norms(all_pair_wcor, prs_matrix.pheno_mat, weights, pheno_matrix.pheno_mask, pheno_norms);
+        }
+        else {
+            for (int32_t i = 0; i < numerator.cols(); ++i) {
+                all_pair_wcor.col(i) = numerator.col(i).array() / ( ( prs_norms * pheno_norms(i) ).array() + 1e-100 );
+            }
         }
 
-        if ( mh_exact_norm && pheno_has_missing ) {
+        if ( exact_norm && pheno_has_missing && lambda != 1.0 ) {
             // group phenotyped individuals by missingness pattern and recompute PRS norms as sqrt( x_jO^T M_OO x_jO )
             std::map<std::string, std::vector<int32_t> > pattern2indices;
             for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
@@ -542,7 +626,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
                 for ( int32_t k = 0; k < n_traits; ++k ) if ( pheno_matrix.pheno_mask(i, k) ) key[k] = '1';
                 pattern2indices[key].push_back(i);
             }
-            notice("Computing exact PRS norms for %d unique missingness patterns among phenotyped individuals with missing values (--mh-exact-norm)", (int32_t)pattern2indices.size());
+            notice("Computing exact PRS norms for %d unique missingness patterns among phenotyped individuals with missing values (--exact-norm)", (int32_t)pattern2indices.size());
             int32_t n_done = 0;
             for ( std::map<std::string, std::vector<int32_t> >::const_iterator it = pattern2indices.begin(); it != pattern2indices.end(); ++it ) {
                 std::vector<int32_t> obs;
@@ -560,20 +644,37 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         }
     }
     else {
-        notice("Computing all pair weighted correlations between PRS traits and phenotypes assuming independence");
-        // missing phenotype cells are 0, so they drop out of the numerator; the denominator is the sum of
-        // absolute weights over the traits observed for each phenotyped individual
+        // missing phenotype cells are 0, so they drop out of the numerator sum_k w_k x_jk y_ik
         all_pair_wcor = prs_matrix.pheno_mat * ( weights.asDiagonal() * pheno_matrix.pheno_mat.transpose() );
-        Eigen::VectorXd abs_weights = weights.cwiseAbs();
-        Eigen::VectorXd denom;
-        if ( pheno_has_missing ) {
-            denom = pheno_matrix.pheno_mask.cast<double>() * abs_weights;
+        if ( no_norm ) {
+            // legacy score: divide by the sum of absolute weights over the traits observed for each phenotyped individual
+            notice("Computing all pair weighted inner products between PRS traits and phenotypes assuming independence (--no-norm)");
+            Eigen::VectorXd abs_weights = weights.cwiseAbs();
+            Eigen::VectorXd denom;
+            if ( pheno_has_missing ) {
+                denom = pheno_matrix.pheno_mask.cast<double>() * abs_weights;
+            }
+            else {
+                denom = Eigen::VectorXd::Constant( n_pheno_samples, abs_weights.sum() );
+            }
+            for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
+                all_pair_wcor.col(i) /= ( denom(i) + 1e-100 );
+            }
         }
         else {
-            denom = Eigen::VectorXd::Constant( n_pheno_samples, abs_weights.sum() );
-        }
-        for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
-            all_pair_wcor.col(i) /= ( denom(i) + 1e-100 );
+            // weighted cosine similarity: identical to --mahalanobis --lambda 1, where M = diag(w)
+            notice("Computing all pair weighted cosine similarities between PRS traits and phenotypes assuming independence");
+            Eigen::VectorXd pheno_norms = ( pheno_matrix.pheno_mat.cwiseAbs2() * weights ).cwiseSqrt(); // sqrt( sum_{k in O_i} w_k y_ik^2 )
+            if ( exact_norm && pheno_has_missing ) {
+                notice("Computing exact PRS norms over observed traits (--exact-norm)");
+                divide_by_exact_diagonal_norms(all_pair_wcor, prs_matrix.pheno_mat, weights, pheno_matrix.pheno_mask, pheno_norms);
+            }
+            else {
+                Eigen::VectorXd prs_norms = ( prs_matrix.pheno_mat.cwiseAbs2() * weights ).cwiseSqrt();   // sqrt( sum_k w_k x_jk^2 )
+                for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
+                    all_pair_wcor.col(i) = all_pair_wcor.col(i).array() / ( ( prs_norms * pheno_norms(i) ).array() + 1e-100 );
+                }
+            }
         }
     }
 
@@ -654,15 +755,17 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
                 z_self, cor_self,
                 self_rank);
         }
-        const char* match_status = "UNCLEAR";
-        if ( self_rank == 1 ) {
+        // self_rank is only meaningful when the individual has a mapped PRS sample; without one, the status is
+        // NO_SELF unless the top matches are clearly separated
+        const char* match_status = ( self_idx >= 0 ) ? "UNCLEAR" : "NO_SELF";
+        if ( self_idx >= 0 && self_rank == 1 ) {
             match_status = "SELF_BEST";
         }
         else if ( z_top[0] > z_top[1] + z_diff_threshold ) {
             match_status = "SINGLE_NEW_BEST";
         }
         else {
-            if ( z_self > z_lenient_threshold ) {
+            if ( self_idx >= 0 && z_self > z_lenient_threshold ) {
                 match_status = "SELF_LENIENT";
             }
             for(int32_t k=2; k < 5; ++k ) {
