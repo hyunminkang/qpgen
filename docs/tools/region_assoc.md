@@ -241,14 +241,21 @@ the covariate-residualized, mean-centered phenotype (one column per trait, `K` t
 
 | File | Contents | susieR entry point |
 |---|---|---|
-| `.suff.bin.gz` | `XtX = X'X` (`p x p`), `Xty = X'y` (`p x K`), `yty = y'y` (`K`), `n` | `susie_suff_stat(XtX, Xty, yty, n)` in susieR <= 0.12; in newer versions convert with `suff_to_rss()` (below) and call `susie_rss()` |
+| `.suff.bin.gz` | `XtX = X'X` (`p x p`), `Xty = X'y` (`p x K`), `yty = y'y` (`K`), `n` | `susie_ss(XtX, Xty, yty, n)` in susieR >= 0.14 (`susie_suff_stat()` in CRAN susieR <= 0.12) |
 | `.rss.bin.gz` | `R = cov2cor(X'X)` (`p x p`), `z = bhat/shat`, `bhat`, `shat` (`p x K`), `var_y = y'y/(n-1)` (`K`), `n` | `susie_rss(z = z, R = R, n = n)` or `susie_rss(bhat, shat, R, n, var_y)` |
 
-`bhat`, `shat` and `z` are the same values as `BETA`, `SE` and `TSTAT` in the association file.
-Passing `bhat`, `shat` and `var_y` (rather than `z` alone) to `susie_rss()` is equivalent to
-fitting on the sufficient statistics and returns coefficients on the per-ALT-allele scale of the
-input; passing `z` alone gives PIPs that are numerically the same but coefficients on the
-standardized scale.
+The sufficient-statistics file is the primary export. `X'X`, `X'y`, `y'y` and `n` are the exact
+individual-level likelihood, and `susie_ss()` on them reproduces the built-in `--susie` fit
+(same `sigma2`, credible sets and PIPs). Use this file whenever you fit susieR yourself.
+
+The RSS file exists for tools that take marginal statistics plus an LD matrix. `bhat`, `shat` and
+`z` in it are the same values as `BETA`, `SE` and `TSTAT` in the association file, and `R` is the
+in-sample LD of the same residualized data. Note that `susie_rss()` is **not** equivalent to the
+sufficient-statistics fit under its defaults: it fixes the residual variance
+(`estimate_residual_variance = FALSE`), which on the test data changed `sigma2` from 0.937 to
+1.285 and moved PIPs by up to 0.05. With `estimate_residual_variance = TRUE` and `bhat`, `shat`,
+`var_y` and `n` supplied, `susie_rss()` rebuilds `X'X`, `X'y` and `y'y` internally and matches
+`susie_ss()` to about 1e-9. Passing `z` alone fixes `sigma2 = 1` and gives the RSS-model fit.
 
 **Binary layout** (little-endian; strings are NUL-terminated; matrices are column-major, as R's
 `matrix()` expects):
@@ -279,19 +286,21 @@ double[K]   yty                double[p*K] bhat
 library(susieR)
 source("scripts/qpgen_susie_io.R")
 
-rss <- read_qpgen_rss("out.rss.bin.gz")     # list(R, z, bhat, shat, var_y, n, variants, traits, af, ...)
-fit <- susie_from_qpgen(rss, trait = "ENSG00000187634", L = 10)
-fit$sets$cs                                  # credible sets (indices into rss$variants)
+ss  <- read_qpgen_suff("out.suff.bin.gz")   # list(XtX, Xty, yty, n, variants, traits, af, ...)
+fit <- susie_from_qpgen(ss, trait = "ENSG00000187634", L = 10)   # = susie_ss(XtX, Xty, yty, n, L = 10)
+fit$sets$cs                                  # credible sets (indices into ss$variants)
 head(sort(susie_get_pip(fit), decreasing = TRUE))
 
-ss  <- read_qpgen_suff("out.suff.bin.gz")   # list(XtX, Xty, yty, n, ...)
-fit2 <- susie_from_qpgen(ss, trait = 1, L = 10)   # same result via suff_to_rss()
+rss  <- read_qpgen_rss("out.rss.bin.gz")    # list(R, z, bhat, shat, var_y, n, ...)
+fit2 <- susie_from_qpgen(rss, trait = 1, L = 10,   # = susie_rss(bhat, shat, R, n, var_y, ...)
+                         estimate_residual_variance = TRUE)   # needed to match fit
 ```
 
-`susie_from_qpgen()` calls `susie_rss(bhat, shat, R, n, var_y, ...)`; any further arguments
+`susie_from_qpgen()` dispatches on the file type: `susie_ss()` for the sufficient statistics
+(`susie_suff_stat()` on old susieR), `susie_rss()` for the RSS file. Any further arguments
 (`L`, `coverage`, `min_abs_corr`, `estimate_residual_variance`, ...) pass through. Use
-`fit$sets` for credible sets, or `susie_get_cs(fit, Xcorr = rss$R)`; calling `susie_get_cs()`
-without `Xcorr` skips the purity filter.
+`fit$sets` for credible sets, or `susie_get_cs(fit, Xcorr = cov2cor(ss$XtX))`; calling
+`susie_get_cs()` without `Xcorr` skips the purity filter.
 
 Without the helper, the RSS file reads as:
 
@@ -315,7 +324,7 @@ fit <- susie_rss(bhat = bhat[, 1], shat = shat[, 1], R = R, n = n, var_y = var_y
 ```
 
 The `.suff.bin.gz` file has the same header followed by `XtX` (`p*p` doubles), `Xty` (`p*K`)
-and `yty` (`K`). Python users can read the same layout with `gzip.open()` and
+and `yty` (`K`), to be passed as `susie_ss(XtX, Xty[, 1], yty[1], n, L = 10)`. Python users can read the same layout with `gzip.open()` and
 `numpy.frombuffer(..., dtype="<f8").reshape((p, p), order="F")`.
 
 !!! note

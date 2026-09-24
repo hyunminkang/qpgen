@@ -6,8 +6,9 @@
 ##   source("scripts/qpgen_susie_io.R")
 ##   ss  <- read_qpgen_suff("out.suff.bin.gz")   # X'X, X'y, y'y, n
 ##   rss <- read_qpgen_rss("out.rss.bin.gz")     # z, R, n, bhat, shat, var_y
-##   fit <- susie_from_qpgen(rss, trait = "ENSG00000164308.17", L = 10)
-##   susieR::susie_get_cs(fit); susieR::susie_get_pip(fit)
+##   fit <- susie_from_qpgen(ss,  trait = "ENSG00000164308.17", L = 10)  # susie_ss(XtX, Xty, yty, n)
+##   fit <- susie_from_qpgen(rss, trait = "ENSG00000164308.17", L = 10)  # susie_rss(bhat, shat, R, n, var_y)
+##   fit$sets$cs; susieR::susie_get_pip(fit)
 ##
 ## Both files are gzip (BGZF) streams readable with gzfile(); no extra
 ## packages are needed to read them. Matrices are stored column-major in
@@ -59,10 +60,46 @@ read_qpgen_rss <- function(path) {
   h
 }
 
-## Convert sufficient statistics into the RSS quantities susie_rss() takes
-## (bhat, shat, R, var_y). Same formulas as region-assoc's marginal test
-## (centered X and y, no intercept term, df = n - 2).
+## Fit susieR directly on the sufficient statistics of one trait:
+##   susie_ss(XtX, Xty, yty, n)        in susieR >= 0.14 (exported as susie_ss)
+##   susie_suff_stat(XtX, Xty, yty, n) in susieR <= 0.12 (CRAN)
+## Extra arguments (L, coverage, min_abs_corr, estimate_residual_variance, ...)
+## pass through. Coefficients are on the per-ALT-allele scale of the input.
+susie_from_qpgen_suff <- function(ss, trait = 1, ...) {
+  if (is.character(trait)) trait <- match(trait, ss$traits)
+  if (is.na(trait)) stop("trait not found in file")
+  Xty <- ss$Xty[, trait]; yty <- unname(ss$yty[trait])
+  if (exists("susie_ss", envir = asNamespace("susieR")))
+    susieR::susie_ss(XtX = ss$XtX, Xty = Xty, yty = yty, n = ss$n, ...)
+  else
+    susieR::susie_suff_stat(XtX = ss$XtX, Xty = Xty, yty = yty, n = ss$n, ...)
+}
+
+## Fit susieR on the RSS statistics of one trait via susie_rss(). Prefer the
+## sufficient-statistics file and susie_from_qpgen_suff() when available.
+## Supplying bhat/shat/var_y (rather than z alone) lets susie_rss rebuild X'X,
+## X'y and y'y from R, n and var_y, but susie_rss() fixes the residual
+## variance by default; pass estimate_residual_variance = TRUE to reproduce
+## the sufficient-statistics fit (matches susie_ss() to ~1e-9 on in-sample R).
+susie_from_qpgen_rss <- function(rss, trait = 1, ...) {
+  if (is.character(trait)) trait <- match(trait, rss$traits)
+  if (is.na(trait)) stop("trait not found in file")
+  susieR::susie_rss(bhat = rss$bhat[, trait], shat = rss$shat[, trait], R = rss$R,
+                    n = rss$n, var_y = unname(rss$var_y[trait]), ...)
+}
+
+## Dispatch on the file type: sufficient statistics -> susie_ss(); RSS -> susie_rss().
+susie_from_qpgen <- function(obj, trait = 1, ...) {
+  if (!is.null(obj$XtX)) susie_from_qpgen_suff(obj, trait, ...)
+  else susie_from_qpgen_rss(obj, trait, ...)
+}
+
+## Derive the RSS quantities (bhat, shat, z, R, var_y) from sufficient
+## statistics, using the same formulas as region-assoc's marginal test
+## (centered X and y, no intercept, df = n - 2). Provided for convenience
+## (e.g. to feed other RSS-based tools); not needed to run susieR.
 suff_to_rss <- function(ss, trait = 1) {
+  if (is.character(trait)) trait <- match(trait, ss$traits)
   d    <- diag(ss$XtX)
   Xty  <- ss$Xty[, trait]
   bhat <- Xty / d
@@ -71,23 +108,4 @@ suff_to_rss <- function(ss, trait = 1) {
   R    <- cov2cor(ss$XtX); R <- (R + t(R)) / 2   # bit-exact symmetry
   list(bhat = bhat, shat = shat, z = bhat / shat, R = R, n = ss$n,
        var_y = unname(ss$yty[trait]) / (ss$n - 1))
-}
-
-## Run susieR on one trait from either file type. Extra arguments (L,
-## coverage, min_abs_corr, estimate_residual_variance, ...) pass through
-## to susieR::susie_rss(). Supplying bhat/shat/var_y (rather than z alone)
-## makes susie_rss equivalent to fitting on the sufficient statistics, so
-## coefficients come back on the per-ALT-allele scale of the input.
-susie_from_qpgen <- function(obj, trait = 1, ...) {
-  if (is.character(trait)) trait <- match(trait, obj$traits)
-  if (is.na(trait)) stop("trait not found in file")
-  if (!is.null(obj$XtX)) {                 # sufficient statistics file
-    r <- suff_to_rss(obj, trait)
-    bhat <- r$bhat; shat <- r$shat; R <- r$R; var_y <- r$var_y
-  } else {                                 # RSS file
-    bhat <- obj$bhat[, trait]; shat <- obj$shat[, trait]; R <- obj$R
-    var_y <- obj$var_y[trait]
-  }
-  susieR::susie_rss(bhat = bhat, shat = shat, R = R, n = obj$n,
-                    var_y = unname(var_y), ...)
 }

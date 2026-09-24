@@ -7,11 +7,12 @@
 // Two binary, BGZF/gzip-compressed formats are written, both readable from R
 // with gzfile() + readBin() (see scripts/qpgen_susie_io.R):
 //
-//   * sufficient statistics  ("QPGNSUFF"): X'X, X'y, y'y, n
-//       -> susie_suff_stat(XtX, Xty, yty, n) in susieR <= 0.12, or
-//          susie_rss(bhat, shat, R, n, var_y) after conversion in susieR >= 0.14
+//   * sufficient statistics  ("QPGNSUFF"): X'X, X'y, y'y, n   [primary, exact]
+//       -> susie_ss(XtX, Xty, yty, n) (susieR >= 0.14; susie_suff_stat() in <= 0.12)
 //   * RSS summary statistics ("QPGN_RSS"): z, R (LD correlation), n, bhat, shat, var_y
-//       -> susie_rss(z = z, R = R, n = n) or susie_rss(bhat, shat, R, n, var_y)
+//       -> susie_rss(z = z, R = R, n = n) or susie_rss(bhat, shat, R, n, var_y);
+//          the latter matches the sufficient-statistics fit only with
+//          estimate_residual_variance = TRUE
 //
 // X is the covariate-residualized, mean-centered genotype (dosage) matrix and y
 // the covariate-residualized, mean-centered phenotype, i.e. exactly the data on
