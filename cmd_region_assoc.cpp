@@ -5,6 +5,7 @@
 #include "qgenlib/hts_utils.h"
 #include "assoc_utils.h"
 #include "susie_utils.h"
+#include "susie_export.h"
 #include "qpgen_utils.h"
 #include "qpgen.h"
 #include "pheno.h"
@@ -61,10 +62,16 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string ash_fix_pi_str;              // reduction-test: comma-separated pi values
     std::string ash_fix_sa2_str;             // reduction-test: comma-separated sa2 values
 
+    // export of summary data for external fine-mapping with susieR
+    bool out_suff = false; // sufficient statistics (X'X, X'y, y'y, n)
+    bool out_rss = false;  // RSS summary statistics (z, R, n, bhat, shat, var_y)
+
     // suffix for the output files
     std::string assoc_suffix = ".assoc.tsv.gz";
     std::string susie_cs_suffix = ".susie.cs.tsv.gz";
     std::string susie_lbf_suffix = ".susie.lbf.tsv.gz";
+    std::string suff_suffix = ".suff.bin.gz";
+    std::string rss_suffix = ".rss.bin.gz";
 
     paramList pl;
 
@@ -92,6 +99,10 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("assoc-suffix", &assoc_suffix, "Suffix for the association output file (default: '.assoc.tsv.gz')")
     LONG_STRING_PARAM("susie-cs-suffix", &susie_cs_suffix, "Suffix for the SuSiE credible set output file (default: '.susie.cs.tsv.gz')")
     LONG_STRING_PARAM("susie-lbf-suffix", &susie_lbf_suffix, "Suffix for the SuSiE log Bayes factor output file (default: '.susie.lbf.tsv.gz')")
+    LONG_PARAM("out-suff", &out_suff, "Write sufficient statistics (X'X, X'y, y'y, n) for susieR as a gzipped binary file [out]<suff-suffix>")
+    LONG_PARAM("out-rss", &out_rss, "Write RSS summary statistics (z, LD matrix R, n, bhat, shat, var_y) for susieR::susie_rss as a gzipped binary file [out]<rss-suffix>")
+    LONG_STRING_PARAM("suff-suffix", &suff_suffix, "Suffix for the sufficient statistics output file (default: '.suff.bin.gz')")
+    LONG_STRING_PARAM("rss-suffix", &rss_suffix, "Suffix for the RSS summary statistics output file (default: '.rss.bin.gz')")
 
     LONG_PARAM_GROUP("Auxiliary options", NULL)
     LONG_INT_PARAM("jump-thres-bp", &jump_thres_bp, "Jump threshold in base pairs for the variant index (default: 1000000)")
@@ -185,6 +196,15 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         error("Maximum number of allowed variants reached. Please increase the --max-chunk-vars parameter to a larger value (current value: %d)");
     }
 
+    // The marginal regression below assumes mean-centered phenotypes (it uses
+    // y'y - (x'y)^2/x'x as the residual sum of squares). Covariate adjustment
+    // centers the phenotypes implicitly, but without --cov they are raw, which
+    // inflates y'y by n*mean(y)^2 and hence the SE. Center explicitly here.
+    if ( !input.pheno_matrix.has_missing && input.pheno_matrix.pheno_mat.rows() > 0 ) {
+        Eigen::RowVectorXd pheno_means = input.pheno_matrix.pheno_mat.colwise().mean(); // evaluate first (no aliasing)
+        input.pheno_matrix.pheno_mat.rowwise() -= pheno_means;
+    }
+
     // perform rectangular association analysis
     std::vector<std::vector<slr_sumstat_t> > rect_results;
     notice("Performing rectangular association analysis...");
@@ -238,6 +258,71 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         hprintf(wf, "\n");
     }
     hts_close(wf);
+
+    // ---- Export of summary data for susieR (optional) -----------------------
+    // Both formats are computed from the same covariate-residualized, centered
+    // genotype matrix X and phenotype matrix Y used for the marginal test above,
+    // so susieR::susie_rss(bhat, shat, R, n, var_y) on these files fits the
+    // same model as the built-in --susie (Frisch-Waugh-Lovell residualization).
+    if ( out_suff || out_rss ) {
+        const Eigen::MatrixXd& X = input.geno_chunk.geno_mat;
+        const int32_t n = (int32_t)X.rows();
+        const int32_t p = (int32_t)X.cols();
+        const int32_t K = (int32_t)input.pheno_matrix.pheno_ids.size();
+        if ( p == 0 ) {
+            notice("Skipping --out-suff/--out-rss: no variants loaded in the region");
+        }
+        else {
+            // Y is already covariate-residualized (hence centered) when --cov is
+            // given; center explicitly so y'y is the centered sum of squares regardless.
+            Eigen::MatrixXd Y = input.pheno_matrix.pheno_mat;
+            Eigen::RowVectorXd y_means = Y.colwise().mean(); // evaluate first (no aliasing)
+            Y.rowwise() -= y_means;
+
+            susie_export::RegionMeta meta;
+            meta.region = region;
+            meta.trait_ids = input.pheno_matrix.pheno_ids;
+            meta.n_samples = n;
+            meta.n_cov = (int32_t)input.cov_matrix.pheno_mat.cols();
+            meta.variant_ids.reserve(p); meta.positions.reserve(p); meta.af.reserve(p);
+            for(int32_t j = 0; j < p; ++j) {
+                const cpra_t& cpra = input.geno_chunk.v_cpra[j];
+                const var_cnt_t& vcnt = input.geno_chunk.var_cnts[j];
+                meta.variant_ids.push_back(cpra.to_string());
+                meta.positions.push_back(cpra.pos);
+                meta.af.push_back((double)vcnt.ac / (double)vcnt.an);
+            }
+
+            notice("Computing X'X for %d variants (%.2f GB per p x p matrix)...", p, (double)p * p * 8.0 / 1e9);
+            Eigen::MatrixXd XtX = Eigen::MatrixXd::Zero(p, p);
+            XtX.selfadjointView<Eigen::Lower>().rankUpdate(X.transpose());
+            XtX.triangularView<Eigen::StrictlyUpper>() = XtX.transpose();
+
+            if ( out_suff ) {
+                Eigen::MatrixXd Xty = X.transpose() * Y;                 // p x K
+                Eigen::VectorXd yty = Y.colwise().squaredNorm().transpose(); // K
+                std::string suff_path = outf + suff_suffix;
+                susie_export::write_suff_stats(suff_path.c_str(), meta, XtX, Xty, yty);
+                notice("Sufficient statistics (X'X, X'y, y'y, n=%d) written to %s", n, suff_path.c_str());
+            }
+            if ( out_rss ) {
+                Eigen::MatrixXd R = susie_export::xtx_to_corr(XtX);
+                Eigen::MatrixXd z(p, K), bhat(p, K), shat(p, K);
+                for(int32_t j = 0; j < p; ++j) {
+                    for(int32_t k = 0; k < K; ++k) {
+                        const slr_sumstat_t& ss = rect_results[j][k]; // same values as the .assoc file
+                        z(j, k) = ss.tstat;
+                        bhat(j, k) = ss.beta;
+                        shat(j, k) = ss.se;
+                    }
+                }
+                Eigen::VectorXd var_y = Y.colwise().squaredNorm().transpose() / (double)(n - 1);
+                std::string rss_path = outf + rss_suffix;
+                susie_export::write_rss_stats(rss_path.c_str(), meta, R, z, bhat, shat, var_y);
+                notice("RSS summary statistics (z, R, bhat, shat, var_y, n=%d) written to %s", n, rss_path.c_str());
+            }
+        }
+    }
 
     // ---- SuSiE fine-mapping (optional) --------------------------------------
     // Fine-mapping reuses the same genotype chunk and covariate-adjusted phenotype

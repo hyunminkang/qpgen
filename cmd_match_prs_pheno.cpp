@@ -75,9 +75,6 @@ struct LambdaTuner {
             if ( has_missing ) maskmap.row(r) = mask.row(pheno_idx[keep[r]]).cast<double>();
             self_rows.push_back(prs_idx[keep[r]]);
         }
-        if ( metric != "mean-log-softmax" && metric != "mean-z" && metric != "mrr" ) {
-            error("Unknown --auto-lambda-metric '%s'. Options: mean-log-softmax, mean-z, mrr", metric.c_str());
-        }
     }
 
     double evaluate(double lambda) {
@@ -148,7 +145,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     std::string missing_str("NA");  // comma-separated strings representing missing values
     bool cov_impute_mean = false;  // mean-impute missing covariates instead of dropping samples
     bool missing_as_mean = false;  // impute missing phenotypes with the trait mean instead of ignoring them
-    bool missing_as_min = false;   // impute missing phenotypes with the trait minimum (e.g. below detection limit)
+    bool missing_as_half_min = false; // impute missing phenotypes with half of the trait minimum (below detection limit)
     bool rint_after_adj = false;   // Perform rank-based inverse normal transformation after covariate adjustment
     bool use_mahalanobis = false;  // Use Mahalanobis distance for matching
     bool auto_lambda = false;     // tune the Mahalanobis shrinkage parameter on the mapped samples
@@ -197,7 +194,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Imputation options", NULL)
     LONG_PARAM("cov-impute-mean", &cov_impute_mean, "Mean-impute missing covariate values instead of dropping samples with any missing covariate (default: false)")
     LONG_PARAM("missing-as-mean", &missing_as_mean, "Impute missing phenotype values with the mean of observed values for the trait, then treat them as observed (default: false, missing values are ignored)")
-    LONG_PARAM("missing-as-min", &missing_as_min, "Impute missing phenotype values with the minimum of observed values for the trait, e.g. for measurements below a detection limit, then treat them as observed (default: false, missing values are ignored)")
+    LONG_PARAM("missing-as-half-min", &missing_as_half_min, "Impute missing phenotype values with half of the minimum observed value for the trait, the usual convention for measurements below a detection limit, then treat them as observed (default: false, missing values are ignored)")
 
     LONG_PARAM_GROUP("Auto-lambda options (with --mahalanobis)", NULL)
     LONG_PARAM("auto-lambda", &auto_lambda, "Choose the shrinkage parameter lambda automatically by maximizing the separation of the mapped self matches (default: false)")
@@ -210,6 +207,37 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+
+    // validate option combinations before reading any input
+    if ( prsf.empty() || phef.empty() || outf.empty() ) {
+        error("--prs, --pheno and --out are required");
+    }
+    if ( missing_as_mean && missing_as_half_min ) {
+        error("--missing-as-mean and --missing-as-half-min cannot be used together");
+    }
+    if ( no_norm && use_mahalanobis ) {
+        error("--no-norm applies only to the independence score and cannot be combined with --mahalanobis");
+    }
+    if ( lambda < 0.0 || lambda > 1.0 ) {
+        error("Invalid value for --lambda: %.4f. Must be between 0 and 1", lambda);
+    }
+    if ( auto_lambda ) {
+        if ( !use_mahalanobis ) {
+            error("--auto-lambda requires --mahalanobis; the independence score has no shrinkage parameter");
+        }
+        if ( lambda > 0 ) {
+            error("Cannot use --auto-lambda together with a non-zero --lambda. Set --lambda 0 (default) to tune it automatically");
+        }
+        if ( auto_lambda_metric != "mean-log-softmax" && auto_lambda_metric != "mean-z" && auto_lambda_metric != "mrr" ) {
+            error("Unknown --auto-lambda-metric '%s'. Options: mean-log-softmax, mean-z, mrr", auto_lambda_metric.c_str());
+        }
+    }
+    if ( weight_prs_mh < 0.0 || weight_prs_mh > 1.0 ) {
+        error("Invalid value for --weight-prs-mh: %.4f. Must be between 0 and 1", weight_prs_mh);
+    }
+    if ( n_threads < 1 ) {
+        error("--threads must be at least 1");
+    }
 
     if ( n_threads > 1 ) {
         Eigen::setNbThreads(n_threads);
@@ -317,13 +345,10 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     notice("Subsetted to %d overlapping phenotypes between PRS and phenotype matrices", (int32_t)pheno_matrix.pheno_ids.size());
 
     // optionally impute missing phenotypes so that they are treated as observed downstream
-    if ( missing_as_mean && missing_as_min ) {
-        error("--missing-as-mean and --missing-as-min cannot be used together");
-    }
-    if ( ( missing_as_mean || missing_as_min ) && pheno_matrix.has_missing ) {
-        int64_t n_imputed = pheno_matrix.impute_missing(missing_as_min);
-        notice("Imputed %lld missing phenotype values with the trait %s (%s)", (long long)n_imputed,
-               missing_as_min ? "minimum" : "mean", missing_as_min ? "--missing-as-min" : "--missing-as-mean");
+    if ( ( missing_as_mean || missing_as_half_min ) && pheno_matrix.has_missing ) {
+        int64_t n_imputed = pheno_matrix.impute_missing(missing_as_half_min);
+        notice("Imputed %lld missing phenotype values with %s of the trait (%s)", (long long)n_imputed,
+               missing_as_half_min ? "half of the minimum" : "the mean", missing_as_half_min ? "--missing-as-half-min" : "--missing-as-mean");
     }
 
     // samples dropped from the phenotype matrix because of missing covariates
@@ -537,9 +562,6 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         notice("%d phenotyped individuals have no observed traits with non-zero weight and will be reported as NO_OBS_TRAITS", n_no_obs_traits);
     }
 
-    if ( no_norm && use_mahalanobis ) {
-        error("--no-norm applies only to the independence score and cannot be combined with --mahalanobis");
-    }
     if ( !no_norm && weights.minCoeff() < 0 ) {
         error("Negative trait weights are not allowed when profile norms are used (they arise from --weights or a negative --min-weight). Use --min-weight 0 or higher, or --no-norm");
     }
@@ -555,13 +577,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         Eigen::MatrixXd pheno_cov = pheno_matrix.pheno_mat.transpose() * pheno_matrix.pheno_mat / (double)pheno_matrix.pheno_mat.rows();
         notice("Comptuing total covariance matrix");
         Eigen::MatrixXd total_cov = weight_prs_mh * prs_cov + (1.0 - weight_prs_mh) * pheno_cov + 1e-8 * Eigen::MatrixXd::Identity( prs_cov.rows(), prs_cov.cols() );
-        if ( lambda < 0.0 || lambda > 1.0 ) {
-            error("Invalid value for lambda: %.4f. Must be between 0 and 1", lambda);
-        }
         if ( auto_lambda ) {
-            if ( lambda > 0 ) {
-                error("Cannot use --auto-lambda together with a non-zero --lambda. Set --lambda 0 (default) to tune it automatically");
-            }
             notice("Tuning lambda on %d mapped samples by maximizing %s (--auto-lambda)", (int32_t)matching_pheno_samp_indices.size(), auto_lambda_metric.c_str());
             LambdaTuner tuner(total_cov, prs_matrix.pheno_mat, pheno_matrix.pheno_mat, pheno_matrix.pheno_mask, pheno_has_missing,
                               weights, matching_prs_samp_indices, matching_pheno_samp_indices, n_traits_obs, auto_lambda_metric, auto_lambda_min_self);

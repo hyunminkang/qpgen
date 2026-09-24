@@ -29,7 +29,7 @@ The command runs the following steps in this order.
 
 1. **Load** the PRS, phenotype and optional covariate matrices. Cells matching one of the `--missing-str` strings (default `NA`) are flagged missing. The PRS matrix must be complete.
 2. **Match traits** between the two matrices by identical names, or by the explicit `--trait-tsv` mapping. Only shared traits are kept, in the same order in both matrices.
-3. **Impute missing phenotypes** if `--missing-as-mean` or `--missing-as-min` is set; see section 5. By default nothing is imputed.
+3. **Impute missing phenotypes** if `--missing-as-mean` or `--missing-as-half-min` is set; see section 5. By default nothing is imputed.
 4. **Adjust for covariates** if `--cov` is given: the phenotype and covariate matrices are restricted to shared samples, samples with a missing covariate are dropped (or mean-imputed with `--cov-impute-mean`), and each trait is replaced by its residual from a linear regression on an intercept and the covariates.
 5. **Rank-based inverse normal transformation** (RINT) of each trait if `--rint` is set: observed values are replaced by \(\Phi^{-1}\big(r/(n+1)\big)\), where \(r\) is the average rank among the \(n\) observed values of that trait.
 6. **Map samples.** The mapped pairs \(\mathcal{P}\) are read from `--sample-tsv`, or formed from identical sample identifiers. Pairs are used to estimate the trait weights and to evaluate each phenotyped sample's own PRS. Phenotyped samples without a pair are still scored against all PRS samples but have no "self".
@@ -164,12 +164,12 @@ A missing phenotype carries no information about the sample, so the trait is lef
 
 Two consequences are worth knowing. First, ignoring a trait and imputing its standardized mean give the same numerator, because an imputed zero contributes nothing to any candidate's score; with the default PRS norm over all traits, the Z-scores and ranks are then identical as well, and only `COR` and `N.Traits` differ. Second, the observed block \(M_{O_i}\) of the precision matrix is the precision of the observed traits conditional on the unobserved ones, not the inverse of their marginal covariance. When a missing trait is strongly correlated with an observed one, this gives the observed trait more weight than the marginal form would. A per-pattern marginal form is a possible future refinement.
 
-### 5.2 `--missing-as-mean` and `--missing-as-min`
+### 5.2 `--missing-as-mean` and `--missing-as-half-min`
 
 Both options fill missing phenotype cells immediately after trait matching (step 3 of the pipeline), before covariate adjustment and RINT, and then treat the filled cells as observed everywhere: in the regression, the ranks, the standardization, the weights and the scores. `N.Traits` then counts all traits with non-zero weight.
 
 - `--missing-as-mean` fills each missing cell with the mean of the observed values of that trait. As noted above, this changes Z-scores little relative to ignoring, but the filled cells do participate in RINT ranks, in the standard deviation, in the weights, and in the Mahalanobis quadratic form.
-- `--missing-as-min` fills each missing cell with the minimum of the observed values of that trait. This is the right choice when missingness is informative and means "below the detection limit", as is common for proteomic, metabolomic and other assay data. With `--rint`, the filled cells form a tied block at the bottom of the ranking and are transformed to a low value. A quick diagnostic for informative missingness is whether the mapped samples' own standardized PRS for a trait is systematically negative when that trait is missing.
+- `--missing-as-half-min` fills each missing cell with half of the minimum observed value of that trait, the usual convention in metabolomics and other assay data when a missing measurement means "below the detection limit". It assumes positive measurements; a warning is issued for traits whose minimum is not positive, since half of it is then not below the observed values. With `--rint`, the filled cells form a tied block strictly below all observed values and are transformed to a low value, so the exact fraction of the minimum does not matter there. A quick diagnostic for informative missingness is whether the mapped samples' own standardized PRS for a trait is systematically negative when that trait is missing.
 
 The two options cannot be combined. Traits with no observed value at all are left missing with a warning.
 
@@ -182,7 +182,7 @@ By default, every sample with at least one missing covariate is dropped from the
 | situation | recommendation |
 |---|---|
 | missing at random, or reasons unrelated to the trait value | default (ignore) |
-| missing means below detection limit | `--missing-as-min` |
+| missing means below detection limit | `--missing-as-half-min` |
 | reproducing an analysis that imputed means | `--missing-as-mean` |
 | a few samples lack a covariate | default (drop) if they are few, `--cov-impute-mean` if they are many |
 

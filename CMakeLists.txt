@@ -94,6 +94,8 @@ set(SOURCE_FILES
     assoc_utils.cpp
     susie_utils.h
     susie_utils.cpp
+    susie_export.h
+    susie_export.cpp
     include/pgenlib_misc.cc
     include/pgenlib_misc.h
     include/pgenlib_read.cc

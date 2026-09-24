@@ -202,9 +202,10 @@ int32_t PhenoMatrix::subset_pheno_ids(const std::vector<std::string>& pheno_ids)
     return subset_pheno_indices( phe_pheno_indices );
 }
 
-int64_t PhenoMatrix::impute_missing(bool as_min) {
+int64_t PhenoMatrix::impute_missing(bool as_half_min) {
     int64_t n_imputed = 0;
     int32_t n_cols_all_missing = 0;
+    int32_t n_cols_nonpositive_min = 0;
     for ( int32_t j = 0; j < pheno_mat.cols(); ++j ) {
         double sum = 0.0, minv = 0.0;
         int32_t n_obs = 0;
@@ -217,7 +218,8 @@ int64_t PhenoMatrix::impute_missing(bool as_min) {
         }
         if ( n_obs == 0 ) { ++n_cols_all_missing; continue; }
         if ( n_obs == pheno_mat.rows() ) continue;
-        double fill = as_min ? minv : sum / (double)n_obs;
+        if ( as_half_min && minv <= 0.0 ) ++n_cols_nonpositive_min;
+        double fill = as_half_min ? 0.5 * minv : sum / (double)n_obs;
         for ( int32_t i = 0; i < pheno_mat.rows(); ++i ) {
             if ( !pheno_mask(i, j) ) {
                 pheno_mat(i, j) = fill;
@@ -228,6 +230,9 @@ int64_t PhenoMatrix::impute_missing(bool as_min) {
     }
     if ( n_cols_all_missing > 0 ) {
         warning("%d phenotypes have no observed values and were left missing", n_cols_all_missing);
+    }
+    if ( n_cols_nonpositive_min > 0 ) {
+        warning("%d phenotypes have a non-positive observed minimum, so half of the minimum is not below the observed values; half-minimum imputation assumes positive measurements", n_cols_nonpositive_min);
     }
     recompute_has_missing();
     return n_imputed;

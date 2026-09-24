@@ -15,6 +15,16 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
     --region chr1:1000000-2000000 --traits ENSG00000187634 --out [out_prefix]
 ```
 
+To export the region's summary data for fine-mapping in R with
+[susieR](https://github.com/stephenslab/susieR) instead of (or in addition to) the built-in
+fine-mapper:
+
+```bash
+qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
+    --region chr1:1000000-2000000 --traits ENSG00000187634 --out [out_prefix] \
+    --out-suff --out-rss
+```
+
 To additionally fine-map the region with SuSiE:
 
 ```bash
@@ -63,8 +73,24 @@ Monomorphic variants (AC = 0 or AC = AN) in the analyzed samples are always drop
 * `--assoc-suffix` : Suffix for the marginal association output (default: `.assoc.tsv.gz`).
 * `--susie-cs-suffix` : Suffix for the SuSiE credible-set output (default: `.susie.cs.tsv.gz`).
 * `--susie-lbf-suffix` : Suffix for the SuSiE per-variant log Bayes factor output (default: `.susie.lbf.tsv.gz`).
+* `--suff-suffix` : Suffix for the sufficient-statistics export written by `--out-suff` (default: `.suff.bin.gz`).
+* `--rss-suffix` : Suffix for the RSS summary-statistics export written by `--out-rss` (default: `.rss.bin.gz`).
 
-Suffixes ending in `.gz` produce bgzipped output; any other suffix produces plain text.
+Suffixes ending in `.gz` produce bgzipped output; any other suffix produces plain text. The two
+binary exports are always bgzipped regardless of suffix.
+
+### Summary-data export for susieR
+
+* `--out-suff` : Write the **sufficient statistics** `X'X`, `X'y`, `y'y` and `n` to `[out_prefix].suff.bin.gz` (default: off).
+* `--out-rss` : Write the **RSS summary statistics** `z`, LD correlation matrix `R`, `n`, `bhat`, `shat` and `var_y` to `[out_prefix].rss.bin.gz` (default: off).
+
+Both are computed from the same covariate-residualized, mean-centered genotype matrix `X` and
+phenotype matrix `Y` used for the marginal association and for `--susie`, so fitting them with
+`susieR` reproduces the built-in fine-mapping. See
+the corresponding section under [Expected Output](#expected-output) for the file layout and how
+to load them in R. Both files contain a `p x p` matrix of doubles, so their size grows as
+`8 * p^2` bytes before compression: about 80 MB for 3,000 variants and 8 GB for 30,000. Restrict
+the region (or the allele-frequency filters) accordingly.
 
 ## SuSiE fine-mapping
 
@@ -203,6 +229,100 @@ in the region, whether or not it belongs to a credible set.
 * `theta` : Posterior mean unmappable effect on the standardized-genotype scale (equivalent to `susieR`'s `fit$theta`). **Present only with `--unmappable-effects inf` or `ash`.**
 * `lbf.L1` ... `lbf.L[L]` : Log Bayes factor of this variant under each single effect, where `L` is `min(--susie-L, number of variants)`
 
+### `[out_prefix].suff.bin.gz` and `[out_prefix].rss.bin.gz` --- summary-data export for susieR
+
+Written only with `--out-suff` / `--out-rss`. These are gzip (BGZF) compressed binary files
+that need no extra R packages to read: `gzfile()` + `readBin()` is enough. A ready-made reader is
+provided in [`scripts/qpgen_susie_io.R`](https://github.com/hyunminkang/qpgen/blob/main/scripts/qpgen_susie_io.R).
+
+**Quantities.** `X` is the `n x p` matrix of ALT-allele dosages, mean-imputed for missing
+genotypes, mean-centered, and residualized against the covariates when `--cov` is given. `y` is
+the covariate-residualized, mean-centered phenotype (one column per trait, `K` traits).
+
+| File | Contents | susieR entry point |
+|---|---|---|
+| `.suff.bin.gz` | `XtX = X'X` (`p x p`), `Xty = X'y` (`p x K`), `yty = y'y` (`K`), `n` | `susie_suff_stat(XtX, Xty, yty, n)` in susieR <= 0.12; in newer versions convert with `suff_to_rss()` (below) and call `susie_rss()` |
+| `.rss.bin.gz` | `R = cov2cor(X'X)` (`p x p`), `z = bhat/shat`, `bhat`, `shat` (`p x K`), `var_y = y'y/(n-1)` (`K`), `n` | `susie_rss(z = z, R = R, n = n)` or `susie_rss(bhat, shat, R, n, var_y)` |
+
+`bhat`, `shat` and `z` are the same values as `BETA`, `SE` and `TSTAT` in the association file.
+Passing `bhat`, `shat` and `var_y` (rather than `z` alone) to `susie_rss()` is equivalent to
+fitting on the sufficient statistics and returns coefficients on the per-ALT-allele scale of the
+input; passing `z` alone gives PIPs that are numerically the same but coefficients on the
+standardized scale.
+
+**Binary layout** (little-endian; strings are NUL-terminated; matrices are column-major, as R's
+`matrix()` expects):
+
+```
+char[8]   magic       "QPGNSUFF" (suff) or "QPGN_RSS" (rss)
+int32     version     1
+int32     n           number of samples
+int32     p           number of variants
+int32     K           number of traits
+int32     n_cov       number of covariates residualized out (0 without --cov)
+str       region      CHROM:BEG-END
+str[K]    trait_ids
+str[p]    variant_ids CHROM:POS:REF:ALT (ALT is the dosage allele)
+int32[p]  pos         1-based position
+double[p] af          ALT allele frequency
+--- suff body ---              --- rss body ---
+double[p*p] XtX                double[p*p] R
+double[p*K] Xty                double[p*K] z
+double[K]   yty                double[p*K] bhat
+                               double[p*K] shat
+                               double[K]   var_y
+```
+
+**Loading in R.** With the helper script:
+
+```r
+library(susieR)
+source("scripts/qpgen_susie_io.R")
+
+rss <- read_qpgen_rss("out.rss.bin.gz")     # list(R, z, bhat, shat, var_y, n, variants, traits, af, ...)
+fit <- susie_from_qpgen(rss, trait = "ENSG00000187634", L = 10)
+fit$sets$cs                                  # credible sets (indices into rss$variants)
+head(sort(susie_get_pip(fit), decreasing = TRUE))
+
+ss  <- read_qpgen_suff("out.suff.bin.gz")   # list(XtX, Xty, yty, n, ...)
+fit2 <- susie_from_qpgen(ss, trait = 1, L = 10)   # same result via suff_to_rss()
+```
+
+`susie_from_qpgen()` calls `susie_rss(bhat, shat, R, n, var_y, ...)`; any further arguments
+(`L`, `coverage`, `min_abs_corr`, `estimate_residual_variance`, ...) pass through. Use
+`fit$sets` for credible sets, or `susie_get_cs(fit, Xcorr = rss$R)`; calling `susie_get_cs()`
+without `Xcorr` skips the purity filter.
+
+Without the helper, the RSS file reads as:
+
+```r
+con <- gzfile("out.rss.bin.gz", "rb")
+stopifnot(readChar(con, 8, useBytes = TRUE) == "QPGN_RSS")
+version <- readBin(con, "integer", 1, size = 4, endian = "little")
+d <- readBin(con, "integer", 4, size = 4, endian = "little"); n <- d[1]; p <- d[2]; K <- d[3]
+region   <- readBin(con, "character", 1)
+traits   <- readBin(con, "character", K)
+variants <- readBin(con, "character", p)
+pos      <- readBin(con, "integer", p, size = 4, endian = "little")
+af       <- readBin(con, "double", p)
+R    <- matrix(readBin(con, "double", p * p), p, p, dimnames = list(variants, variants))
+z    <- matrix(readBin(con, "double", p * K), p, K, dimnames = list(variants, traits))
+bhat <- matrix(readBin(con, "double", p * K), p, K)
+shat <- matrix(readBin(con, "double", p * K), p, K)
+var_y <- readBin(con, "double", K)
+close(con)
+fit <- susie_rss(bhat = bhat[, 1], shat = shat[, 1], R = R, n = n, var_y = var_y[1], L = 10)
+```
+
+The `.suff.bin.gz` file has the same header followed by `XtX` (`p*p` doubles), `Xty` (`p*K`)
+and `yty` (`K`). Python users can read the same layout with `gzip.open()` and
+`numpy.frombuffer(..., dtype="<f8").reshape((p, p), order="F")`.
+
+!!! note
+    The LD matrix `R` is the in-sample correlation of the *covariate-residualized* dosages, not
+    of the raw genotypes. This is what makes `susie_rss` on these files equivalent to the
+    individual-level fit; it is not a drop-in reference LD panel for other GWAS.
+
 ## Full Usage 
 
 The full usage of `qpgentools region-assoc` can be viewed with the `--help` option:
@@ -241,6 +361,10 @@ Available Options:
    --assoc-suffix         [STR: .assoc.tsv.gz] : Suffix for the association output file (default: '.assoc.tsv.gz')
    --susie-cs-suffix      [STR: .susie.cs.tsv.gz] : Suffix for the SuSiE credible set output file (default: '.susie.cs.tsv.gz')
    --susie-lbf-suffix     [STR: .susie.lbf.tsv.gz] : Suffix for the SuSiE log Bayes factor output file (default: '.susie.lbf.tsv.gz')
+   --out-suff             [FLG: OFF]          : Write sufficient statistics (X'X, X'y, y'y, n) for susieR as a gzipped binary file [out]<suff-suffix>
+   --out-rss              [FLG: OFF]          : Write RSS summary statistics (z, LD matrix R, n, bhat, shat, var_y) for susieR::susie_rss as a gzipped binary file [out]<rss-suffix>
+   --suff-suffix          [STR: .suff.bin.gz] : Suffix for the sufficient statistics output file (default: '.suff.bin.gz')
+   --rss-suffix           [STR: .rss.bin.gz]  : Suffix for the RSS summary statistics output file (default: '.rss.bin.gz')
 
 == Auxiliary options ==
    --jump-thres-bp        [INT: 1000000]      : Jump threshold in base pairs for the variant index (default: 1000000)

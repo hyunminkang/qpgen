@@ -29,7 +29,7 @@ qpgentools match-prs-pheno --prs [prs_matrix] --pheno [pheno_matrix] --out [out_
 * `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'.
 * `--missing-str` : Comma-separated strings that represent missing values in the phenotype and covariate matrices (default: `NA`). The PRS matrix must not contain missing values; the program stops with an error if it does.
 * `--missing-as-mean` : Impute missing phenotype values with the mean of the observed values of that trait and treat them as observed from then on (default: false). See [Handling missing values](#handling-missing-values).
-* `--missing-as-min` : Impute missing phenotype values with the minimum of the observed values of that trait and treat them as observed, appropriate when missing means below a detection limit (default: false). Cannot be combined with `--missing-as-mean`.
+* `--missing-as-half-min` : Impute missing phenotype values with half of the minimum observed value of that trait and treat them as observed, the usual convention when missing means below a detection limit, as in metabolomics (default: false). Assumes positive measurements; a warning is issued for traits whose minimum is not positive. Cannot be combined with `--missing-as-mean`.
 * `--cov-impute-mean` : When covariates contain missing values, mean-impute them (using the mean of observed samples per covariate) instead of dropping samples with any missing covariate (default: false). See [Handling missing values](#handling-missing-values).
 * `--rint` : Perform rank-based inverse normal transformation on phenotypes after covariate adjustment (default: false).
 * `--mahalanobis` : Account for correlations between traits by whitening the profiles with a shrunk covariance matrix before computing the cosine similarity (default: false). With `--lambda 1` this is identical to the default independence score, computed by a slower route.
@@ -53,7 +53,7 @@ These options apply with `--mahalanobis` and control the automatic choice of the
 
 ## Handling missing values
 
-Missing phenotype values (strings listed in `--missing-str`, `NA` by default) are ignored by default rather than imputed. Two alternatives impute them before any other processing and then treat them as observed: `--missing-as-mean` fills each missing cell with the trait's observed mean, and `--missing-as-min` fills it with the trait's observed minimum, which is appropriate when a missing measurement indicates a value below the detection limit. With imputation, `N.Traits` counts all traits with non-zero weight. Under the default, concretely:
+Missing phenotype values (strings listed in `--missing-str`, `NA` by default) are ignored by default rather than imputed. Two alternatives impute them before any other processing and then treat them as observed: `--missing-as-mean` fills each missing cell with the trait's observed mean, and `--missing-as-half-min` fills it with half of the trait's observed minimum, the usual convention when a missing measurement indicates a value below the detection limit. With imputation, `N.Traits` counts all traits with non-zero weight. Under the default, concretely:
 
 * Each trait is standardized using the mean and standard deviation of its observed values only. Missing cells contribute nothing to any downstream inner product.
 * Per-trait weights (`Weight` in the weights file) are estimated from the matched samples in which the phenotype is observed; `N.Obs` reports that count.
@@ -133,7 +133,7 @@ Available Options:
 == Imputation options ==
    --cov-impute-mean      [FLG: OFF]          : Mean-impute missing covariate values instead of dropping samples with any missing covariate (default: false)
    --missing-as-mean      [FLG: OFF]          : Impute missing phenotype values with the mean of observed values for the trait, then treat them as observed (default: false, missing values are ignored)
-   --missing-as-min       [FLG: OFF]          : Impute missing phenotype values with the minimum of observed values for the trait, e.g. for measurements below a detection limit, then treat them as observed (default: false, missing values are ignored)
+   --missing-as-half-min  [FLG: OFF]          : Impute missing phenotype values with half of the minimum observed value for the trait, the usual convention for measurements below a detection limit, then treat them as observed (default: false, missing values are ignored)
 
 == Auto-lambda options (with --mahalanobis) ==
    --auto-lambda          [FLG: OFF]          : Choose the shrinkage parameter lambda automatically by maximizing the separation of the mapped self matches (default: false)
