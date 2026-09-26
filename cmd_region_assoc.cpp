@@ -49,6 +49,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string colname_geno_sample("geno"); // column name for the sample IDs in the genotype file 
     bool rint_before_adj = false; // Perform rank-based inverse normal transformation before covariate adjustment
     bool rint_after_adj = false; // Perform rank-based inverse normal transformation after covariate adjustment
+    bool score_test = false;     // REGENIE-style score test (null-model variance, normal p-value) instead of the Wald t-test
 
     // SuSiE fine-mapping options
     bool run_susie = false;
@@ -118,6 +119,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("colname-geno-sample", &colname_geno_sample, "When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')")
     LONG_PARAM("rint-before-adj", &rint_before_adj, "Perform rank-based inverse normal transformation before covariate adjustment (default: false)")
     LONG_PARAM("rint-after-adj", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
+    LONG_PARAM("score", &score_test, "Use the REGENIE-style score test (residual variance under the null with N - n_cov df, normal p-value) and report ZSTAT instead of the Wald TSTAT")
 
     LONG_PARAM_GROUP("SuSiE fine-mapping options", NULL)
     LONG_PARAM("susie", &run_susie, "Run SuSiE fine-mapping for each tested phenotype in the region")
@@ -212,12 +214,27 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
 
     // perform rectangular association analysis
     std::vector<std::vector<slr_sumstat_t> > rect_results;
-    notice("Performing rectangular association analysis...");
-    if ( !simple_rect_regression_without_missing(
-            input.pheno_matrix.pheno_mat,
-            input.geno_chunk.geno_mat,
-            rect_results) ) {
-        error("Failed to perform rectangular association analysis");
+    if ( score_test ) {
+        // n_cov counts the intercept, as the phenotypes and genotypes are centered
+        // (and covariate-residualized when --cov is given)
+        const int32_t n_cov = 1 + (int32_t)input.cov_matrix.pheno_mat.cols();
+        notice("Performing rectangular association analysis with the score test (n_cov = %d including the intercept)...", n_cov);
+        if ( !simple_rect_score_test_without_missing(
+                input.pheno_matrix.pheno_mat,
+                input.geno_chunk.geno_mat,
+                n_cov,
+                rect_results) ) {
+            error("Failed to perform rectangular association analysis");
+        }
+    }
+    else {
+        notice("Performing rectangular association analysis with the Wald t-test...");
+        if ( !simple_rect_regression_without_missing(
+                input.pheno_matrix.pheno_mat,
+                input.geno_chunk.geno_mat,
+                rect_results) ) {
+            error("Failed to perform rectangular association analysis");
+        }
     }
     // write the results
 
@@ -228,10 +245,12 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     }
     // write the header line
     hprintf(wf, "#CHROM\tGENPOS\tID\tALLELE0\tALLELE1\tA1FREQ\tN\tN_RR\tN_RA\tN_AA\tTEST");
+    const char* stat_name = score_test ? "ZSTAT" : "TSTAT";
     for(int32_t i = 0; i < input.pheno_matrix.pheno_ids.size(); ++i) {
-        hprintf(wf, "\tBETA.%s\tSE.%s\tTSTAT.%s\tLOG10P.%s",
+        hprintf(wf, "\tBETA.%s\tSE.%s\t%s.%s\tLOG10P.%s",
                 input.pheno_matrix.pheno_ids[i].c_str(),
                 input.pheno_matrix.pheno_ids[i].c_str(),
+                stat_name,
                 input.pheno_matrix.pheno_ids[i].c_str(),
                 input.pheno_matrix.pheno_ids[i].c_str());
     }

@@ -28,7 +28,7 @@ qpgentools rect-assoc --pgen [pgen] --pivar [pivar] --psam [psam] --pheno [pheno
 * `--pheno-format` : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'.
 * `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'.
 * `--rint-before-adj` : Perform rank-based inverse normal transformation before covariate adjustment (default: false).
-* `--rint-after-adj` : Perform rank-based inverse normal transformation after covariate adjustment (default: false).
+* `--rint-after-adj` : Perform rank-based inverse normal transformation after covariate adjustment (default: false). RINT uses Blom offsets, \(\Phi^{-1}\big((r - 3/8)/(n + 1/4)\big)\) with average ranks \(r\) for ties, as REGENIE's `--apply-rint` and `--apply-rerint` do.
 * `--min-maf` : Minimum minor allele frequency to include a variant in the analysis (default: 1e-10, i.e. only monomorphic variants are excluded).
 * `--min-mac` : Minimum minor allele count to include a variant in the analysis (default: 1.0).
 * `--max-chunk-vars` : Maximum number of variants held in memory at once (default: 100). Variants from `--var-list` are processed in chunks of this size.

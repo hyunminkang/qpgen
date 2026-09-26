@@ -191,6 +191,18 @@ bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& X,
     std::vector<std::vector<slr_sumstat_t> >& results);
 
+// -log10 of the two-sided standard normal p-value for a z statistic
+double zstat2log10pval(double zstat);
+
+// REGENIE-style score test (null-model residual variance with n - n_cov degrees
+// of freedom, normal p-value). Y and X must be centered and covariate-residualized;
+// n_cov counts the intercept. The z statistic is stored in slr_sumstat_t::tstat.
+bool simple_rect_score_test_without_missing(
+    const Eigen::MatrixXd& Y,
+    const Eigen::MatrixXd& X,
+    int32_t n_cov,
+    std::vector<std::vector<slr_sumstat_t> >& results);
+
 Eigen::VectorXd rint_with_missing(
     const Eigen::VectorXd& values,
     const Eigen::Vector<bool, Eigen::Dynamic>& mask);

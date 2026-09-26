@@ -530,6 +530,82 @@ bool simple_rect_regression_without_missing(
     return true;
 }
 
+// -log10 of the two-sided standard normal p-value 2 * Phi(-|z|).
+// Uses erfc() while it does not underflow, and the asymptotic Mills-ratio series
+// for the far tail so that LOG10P stays finite for extreme statistics.
+double zstat2log10pval(double zstat) {
+    if ( !std::isfinite(zstat) ) {
+        return std::isnan(zstat) ? std::numeric_limits<double>::quiet_NaN() : std::numeric_limits<double>::infinity();
+    }
+    const double z = std::fabs(zstat);
+    if ( z < 30.0 ) {
+        return std::max(0.0, -std::log10(std::erfc(z / std::sqrt(2.0)))); // erfc(z/sqrt2) = 2 * Phi(-z); max() avoids -0
+    }
+    // log Phi(-z) = -z^2/2 - log(z) - log(2*pi)/2 + log(1 - 1/z^2 + 3/z^4 - 15/z^6 + 105/z^8)
+    const double z2 = z * z;
+    const double series = 1.0 - 1.0 / z2 + 3.0 / (z2 * z2) - 15.0 / (z2 * z2 * z2) + 105.0 / (z2 * z2 * z2 * z2);
+    const double log_p = std::log(2.0) - 0.5 * z2 - std::log(z) - 0.5 * std::log(2.0 * M_PI) + std::log(series);
+    return -log_p / std::log(10.0);
+}
+
+// Score test for each (variant, trait) pair, matching REGENIE step 2 for
+// quantitative traits. Y and X must be centered and covariate-residualized.
+// The residual variance is estimated under the null model (no variant effect),
+// sigma0^2 = y'y / (n - n_cov), where n_cov counts the intercept. Then
+//   z    = x'y / sqrt(x'x * sigma0^2)
+//   beta = x'y / x'x
+//   se   = sqrt(sigma0^2 / x'x) = |beta / z|
+// and log10p is from the two-sided standard normal. The z statistic is stored
+// in the tstat field of slr_sumstat_t.
+bool simple_rect_score_test_without_missing(
+    const Eigen::MatrixXd& Y,
+    const Eigen::MatrixXd& X,
+    int32_t n_cov,
+    std::vector<std::vector<slr_sumstat_t> >& results) {
+    const int n = Y.rows();
+    const int num_x = X.cols();
+    const int num_y = Y.cols();
+
+    if (n != X.rows()) {
+        error("Matrix dimensions do not match : Y is (%d x %d) while X is (%d x %d)", Y.rows(), Y.cols(), X.rows(), X.cols());
+    }
+    const int df = n - n_cov;
+    if (df <= 0) {
+        error("Not enough data points for the score test (n - n_cov = %d must be > 0).", df);
+    }
+
+    results.clear();
+    results.resize(num_x);
+    if (num_x == 0 || num_y == 0) {
+        return true;
+    }
+
+    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
+    const Eigen::RowVectorXd sigma0_sq = Y.colwise().squaredNorm() / (double)df;
+    const Eigen::MatrixXd xt_y = X.transpose() * Y;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+
+    for (int i = 0; i < num_x; ++i) {
+        std::vector<slr_sumstat_t>& row_results = results[i];
+        row_results.resize(num_y);
+        const double x_norm = x_sq_norms(i);
+        for (int j = 0; j < num_y; ++j) {
+            slr_sumstat_t& ss = row_results[j];
+            ss.n_obs = n;
+            const double se = (x_norm > 0.0) ? std::sqrt(sigma0_sq(j) / x_norm) : nan;
+            if ( !(std::isfinite(se) && se > 0.0) ) {
+                ss.beta = ss.se = ss.tstat = ss.log10p = nan;
+                continue;
+            }
+            ss.beta = xt_y(i, j) / x_norm;
+            ss.se = se;
+            ss.tstat = ss.beta / se; // z statistic
+            ss.log10p = zstat2log10pval(ss.tstat);
+        }
+    }
+    return true;
+}
+
 bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
                                             const Eigen::MatrixXd& X,
@@ -612,6 +688,9 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
     return true;
 }
 
+// Inverse of the standard normal CDF, accurate to about 1e-16 relative error.
+// Algorithm AS 241 (PPND16), Wichura M.J. (1988) Applied Statistics 37:477-484,
+// the same algorithm R uses for qnorm().
 double inverseNormalCDF(double p) {
     if (p <= 0.0 || p >= 1.0) {
         // Return infinity or NaN for out-of-range probabilities
@@ -620,27 +699,61 @@ double inverseNormalCDF(double p) {
         return std::numeric_limits<double>::quiet_NaN();
     }
 
-    // Constants for the rational approximation
-    const double c0 = 2.515517;
-    const double c1 = 0.802853;
-    const double c2 = 0.010328;
-    const double d1 = 1.432788;
-    const double d2 = 0.189269;
-    const double d3 = 0.001308;
-
-    double t;
-    // The approximation is for the upper tail, so we mirror for p < 0.5
-    if (p < 0.5) {
-        t = std::sqrt(-2.0 * std::log(p));
-        double numerator = c0 + c1 * t + c2 * t * t;
-        double denominator = 1.0 + d1 * t + d2 * t * t + d3 * t * t * t;
-        return -(t - numerator / denominator);
-    } else {
-        t = std::sqrt(-2.0 * std::log(1.0 - p));
-        double numerator = c0 + c1 * t + c2 * t * t;
-        double denominator = 1.0 + d1 * t + d2 * t * t + d3 * t * t * t;
-        return t - numerator / denominator;
+    const double q = p - 0.5;
+    if (std::fabs(q) <= 0.425) { // central region
+        const double r = 0.180625 - q * q;
+        return q * (((((((r * 2509.0809287301226727 +
+                   33430.575583588128105) * r + 67265.770927008700853) * r +
+                 45921.953931549871457) * r + 13731.693765509461125) * r +
+               1971.5909503065514427) * r + 133.14166789178437745) * r +
+             3.387132872796366608)
+          / (((((((r * 5226.495278852545925 +
+                   28729.085735721942674) * r + 39307.89580009271061) * r +
+                 21213.794301586595867) * r + 5394.1960214247511077) * r +
+               687.1870074920579083) * r + 42.313330701600911252) * r + 1.0);
     }
+
+    // tails: r = sqrt(-log(min(p, 1-p)))
+    double r = std::sqrt(-std::log(q < 0.0 ? p : 1.0 - p));
+    double val;
+    if (r <= 5.0) {
+        r -= 1.6;
+        val = (((((((r * 7.7454501427834140764e-4 +
+                   0.0227238449892691845833) * r + 0.24178072517745061177) *
+                 r + 1.27045825245236838258) * r +
+                3.64784832476320460504) * r + 5.7694972214606914055) *
+              r + 4.6303378461565452959) * r +
+             1.42343711074968357734)
+            / (((((((r *
+                     1.05075007164441684324e-9 + 5.475938084995344946e-4) *
+                    r + 0.0151986665636164571966) * r +
+                   0.14810397642748007459) * r + 0.68976733498510000455) *
+                 r + 1.6763848301838038494) * r +
+                2.05319162663775882187) * r + 1.0);
+    }
+    else {
+        r -= 5.0;
+        val = (((((((r * 2.01033439929228813265e-7 +
+                   2.71155556874348757815e-5) * r +
+                  0.0012426609473880784386) * r + 0.026532189526576123093) *
+                r + 0.29656057182850489123) * r +
+               1.7848265399172913358) * r + 5.4637849111641143699) *
+             r + 6.6579046435011037772)
+            / (((((((r *
+                     2.04426310338993978564e-15 + 1.4215117583164458887e-7) *
+                    r + 1.8463183175100546818e-5) * r +
+                   7.868691311456132591e-4) * r + 0.0148753612908506148525)
+                 * r + 0.13692988092273580531) * r +
+                0.59983220655588793769) * r + 1.0);
+    }
+    return q < 0.0 ? -val : val;
+}
+
+// Blom's rank-based inverse normal score, qnorm((rank - 3/8) / (n + 1/4)),
+// matching REGENIE's rint_pheno() (--apply-rint / --apply-rerint).
+// `rank` is 1-based; ties should receive the average rank.
+static inline double blom_rint_score(double rank, int32_t n) {
+    return inverseNormalCDF((rank - 0.375) / ((double)n + 0.25));
 }
 
 // Struct to hold value and its original index for sorting purposes
@@ -700,12 +813,8 @@ Eigen::VectorXd rint_without_missing(const Eigen::VectorXd& values) {
 
     // --- 4. Inverse Normal Transformation ---
     Eigen::VectorXd result(n);
-    double n_plus_1 = static_cast<double>(n + 1);
-
     for (int i = 0; i < n; ++i) {
-        double fractional_rank = ranks[i] / n_plus_1;
-        double transformed_value = inverseNormalCDF(fractional_rank);
-        result(indexed_values[i].original_index) = transformed_value;
+        result(indexed_values[i].original_index) = blom_rint_score(ranks[i], n);
     }
 
     // for(int32_t i=0; i < 5; ++i) {
@@ -776,12 +885,8 @@ Eigen::VectorXd rint_with_missing(
 
     // --- 4. Inverse Normal Transformation ---
     Eigen::VectorXd result = Eigen::VectorXd::Constant(values.size(), NAN);
-    double n_plus_1 = static_cast<double>(n_unmasked + 1);
-
     for (int i = 0; i < n_unmasked; ++i) {
-        double fractional_rank = ranks[i] / n_plus_1;
-        double transformed_value = inverseNormalCDF(fractional_rank);
-        result(filtered_values[i].original_index) = transformed_value;
+        result(filtered_values[i].original_index) = blom_rint_score(ranks[i], n_unmasked);
     }
 
     return result;
@@ -804,7 +909,6 @@ Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix) {
     }
 
     Eigen::MatrixXd result(n_rows, n_cols);
-    double n_plus_1 = static_cast<double>(n_rows + 1);
     
     // Reuse the vector for sorting to avoid repeated allocations
     std::vector<ValueIndex> indexed_values(n_rows);
@@ -833,8 +937,7 @@ Eigen::MatrixXd rint_matrix_without_missing(const Eigen::MatrixXd& matrix) {
             // The ranks for the tied group are i+1, i+2, ..., k
             // Average rank = ( (i+1) + k ) / 2.0
             double average_rank = (i + 1 + k) / 2.0;
-            double fractional_rank = average_rank / n_plus_1;
-            double transformed_value = inverseNormalCDF(fractional_rank);
+            double transformed_value = blom_rint_score(average_rank, n_rows);
             
             for (int l = i; l < k; ++l) {
                 result(indexed_values[l].original_index, j) = transformed_value;

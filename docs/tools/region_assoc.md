@@ -69,6 +69,27 @@ Monomorphic variants (AC = 0 or AC = AN) in the analyzed samples are always drop
 * `--rint-before-adj` : Perform rank-based inverse normal transformation before covariate adjustment (default: false).
 * `--rint-after-adj` : Perform rank-based inverse normal transformation after covariate adjustment (default: false).
 
+RINT uses Blom offsets, \(\Phi^{-1}\big((r - 3/8)/(n + 1/4)\big)\) with average ranks \(r\) for ties, as REGENIE's `--apply-rint` and `--apply-rerint` do.
+
+### Test statistic
+
+* `--score` : Use the REGENIE-style score test instead of the default Wald t-test (default: false). The association output then has `ZSTAT` columns instead of `TSTAT`.
+
+The two tests give the same `BETA = x'y / x'x` but differ in how the residual variance is
+estimated:
+
+* **Wald t-test (default).** The residual variance is estimated after fitting the variant,
+  `SE = sqrt((y'y - (x'y)^2 / x'x) / (N - 2) / x'x)`, and `LOG10P` comes from a t-distribution
+  with `N - 2` degrees of freedom.
+* **Score test (`--score`).** The residual variance is estimated under the null model,
+  `sigma0^2 = y'y / (N - n_cov)`, where `n_cov` counts the intercept and the covariates. Then
+  `SE = sqrt(sigma0^2 / x'x)`, `ZSTAT = BETA / SE`, and `LOG10P` comes from the standard normal.
+  This matches REGENIE step 2 for quantitative traits.
+
+For a variant that explains a fraction `R^2` of the phenotype variance, the Wald `SE` is smaller
+than the score `SE` by about `sqrt(1 - R^2)`. The difference is negligible for most variants but
+visible at strong hits.
+
 ### Output file names
 
 * `--assoc-suffix` : Suffix for the marginal association output (default: `.assoc.tsv.gz`).
@@ -157,7 +178,7 @@ both sides makes the reported effect the *partial* effect of the variant, and ma
 `susieR` workflow where both `X` and `y` are residualized before fitting.
 
 !!! note
-    The reported `LOG10P` uses `df = N - 2` and does not subtract the number of covariates. With
+    Without `--score`, the reported `LOG10P` uses `df = N - 2` and does not subtract the number of covariates. With
     a large sample size relative to the number of covariates the difference is negligible, but it
     is worth keeping in mind for small `N`.
 
@@ -222,8 +243,8 @@ Followed, for each trait `[TRAIT]`, by:
 
 * `BETA.[TRAIT]` : Effect size
 * `SE.[TRAIT]` : Standard error
-* `TSTAT.[TRAIT]` : T-statistic
-* `LOG10P.[TRAIT]` : Log10 p-value
+* `TSTAT.[TRAIT]` : Wald t-statistic, or `ZSTAT.[TRAIT]` : score z-statistic with `--score`
+* `LOG10P.[TRAIT]` : -log10 p-value of the selected test
 
 ### `[out_prefix].susie.cs.tsv.gz` --- credible sets
 
@@ -245,8 +266,8 @@ that belong to a reported credible set appear here.
 * `af` : Alternative allele frequency
 * `n` : Sample size used in the marginal test
 * `beta` : Marginal effect size (matches `BETA.[TRAIT]` in the association file)
-* `se` : Marginal standard error
-* `log10p` : Marginal log10 p-value
+* `se` : Marginal standard error (matches `SE.[TRAIT]`, so it follows `--score`)
+* `log10p` : Marginal -log10 p-value (matches `LOG10P.[TRAIT]`, so it follows `--score`)
 
 A trait with no credible set surviving the coverage and purity thresholds contributes no rows.
 
@@ -284,7 +305,7 @@ individual-level likelihood, and `susie_ss()` on them reproduces the built-in `-
 (same `sigma2`, credible sets and PIPs). Use this file whenever you fit susieR yourself.
 
 The RSS file exists for tools that take marginal statistics plus an LD matrix. `bhat`, `shat` and
-`z` in it are the same values as `BETA`, `SE` and `TSTAT` in the association file, and `R` is the
+`z` in it are the same values as `BETA`, `SE` and `TSTAT` (or `ZSTAT` with `--score`) in the association file, and `R` is the
 in-sample LD of the same residualized data. Note that `susie_rss()` is **not** equivalent to the
 sufficient-statistics fit under its defaults: it fixes the residual variance
 (`estimate_residual_variance = FALSE`), which on the test data changed `sigma2` from 0.937 to
@@ -423,6 +444,7 @@ Available Options:
    --colname-geno-sample  [STR: geno]         : When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')
    --rint-before-adj      [FLG: OFF]          : Perform rank-based inverse normal transformation before covariate adjustment (default: false)
    --rint-after-adj       [FLG: OFF]          : Perform rank-based inverse normal transformation after covariate adjustment (default: false)
+   --score                [FLG: OFF]          : Use the REGENIE-style score test (residual variance under the null with N - n_cov df, normal p-value) and report ZSTAT instead of the Wald TSTAT
 
 == SuSiE fine-mapping options ==
    --susie                [FLG: OFF]          : Run SuSiE fine-mapping for each tested phenotype in the region
