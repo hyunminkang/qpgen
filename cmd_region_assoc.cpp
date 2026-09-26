@@ -24,6 +24,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string covf;
     std::string outf;
     std::string samplef;
+    std::string locof;      // REGENIE step-1 LOCO predictions (.loco file or *_pred.list)
 
     // information about the trait and variants to be tested
     std::string traits;   // assume that a single trait is being tested
@@ -84,6 +85,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("pheno", &phef, "Input phenotype matrix")
     LONG_STRING_PARAM("sample", &samplef, "Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files")
     LONG_STRING_PARAM("cov", &covf, "Input covariate matrix (optional)")
+    LONG_STRING_PARAM("loco", &locof, "REGENIE step-1 LOCO predictions: a .loco file (single trait) or a *_pred.list file (TRAIT PATH per line). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("traits", &traits, "Trait IDs (comma-separated) to be tested (required)")
@@ -151,6 +153,10 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     input.set_rint_after_adj(rint_after_adj);
     input.set_minmax_af(min_af, max_af);
     input.set_minmax_ac(min_ac, max_ac);
+    cbe_t region_cbe(region.c_str());
+    if ( !locof.empty() ) {
+        input.set_loco(locof.c_str(), region_cbe.chrom.c_str());
+    }
     if ( !samplef.empty() ) {
         input.set_subset_sample_file(samplef.c_str());
     }
@@ -181,7 +187,6 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         error("Either --pgen-list or --pgen, --pivar, and --psam must be provided");
     }    
 
-    cbe_t region_cbe(region.c_str());
     // read chunk of genotype based on the region
     Eigen::MatrixXd geno_mat;
     Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> geno_mask;

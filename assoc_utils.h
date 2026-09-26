@@ -64,6 +64,13 @@ public:
     double max_ac; // maximum allele count for filtering variants
     genotype_chunk geno_chunk; // genotype chunk for the current region
 
+    // LOCO adjustment using REGENIE step-1 predictions (optional)
+    std::string loco_file;  // REGENIE .loco file (single trait) or *_pred.list file (TRAIT PATH per line)
+    std::string loco_chrom; // chromosome whose leave-one-chromosome-out predictions are subtracted
+    // Per-trait SD of the covariate-residualized phenotype used to standardize it before
+    // subtracting the LOCO predictions (REGENIE's scale_Y). Empty unless LOCO is applied.
+    Eigen::RowVectorXd pheno_scale;
+
     ind_assoc_input() {
         jump_thres_bp = 1000000;
         icol_pivar_idx = 8;
@@ -83,6 +90,19 @@ public:
     }
     void set_rint_before_adj(bool val) { rint_before_adj = val; }
     void set_rint_after_adj(bool val) { rint_after_adj = val; }
+
+    // Enable LOCO adjustment. Must be called before the phenotype matrix is loaded.
+    // locof: a REGENIE .loco file (header starting with FID_IID) when a single trait is tested,
+    //        or a REGENIE *_pred.list file mapping each trait to its .loco file.
+    // chrom: chromosome of the tested region (e.g. "chr1", "1", "chrX"); X maps to 23.
+    void set_loco(const char* locof, const char* chrom) {
+        if ( is_pheno_loaded() ) {
+            error("Cannot set LOCO file after the phenotype matrix is loaded");
+        }
+        loco_file = locof;
+        loco_chrom = chrom;
+    }
+    bool use_loco() const { return !loco_file.empty(); }
 
     void set_minmax_af(double _min_af, double _max_af) {
         min_af = _min_af;

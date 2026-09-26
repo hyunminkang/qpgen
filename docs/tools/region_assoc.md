@@ -47,6 +47,7 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
 
 * `--cov` : Input covariate matrix in Regenie or TSV format. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Covariate handling](#covariate-handling)).
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files.
+* `--loco` : REGENIE step-1 leave-one-chromosome-out (LOCO) predictions, either a single `.loco` file (only when one trait is tested) or a REGENIE `*_pred.list` file with one `TRAIT PATH` line per trait. The prediction row for the chromosome of `--region` is subtracted from the phenotype (see [LOCO adjustment](#loco-adjustment)).
 * `--pheno-format` : Format of the phenotype file (default: `regenie`). Options: `regenie`, `tensorqtl`, `tsv-sample-col`, `tsv-sample-row`.
 * `--cov-format` : Format of the covariate file (default: `regenie`). Options: `regenie`, `tsv-sample-col`, `tsv-sample-row`.
 * `--colname-pheno-sample` / `--colname-geno-sample` : When `--sample` is provided, the column names holding the phenotype-side and genotype-side sample IDs (defaults: `pheno` and `geno`).
@@ -163,6 +164,40 @@ both sides makes the reported effect the *partial* effect of the variant, and ma
 !!! warning
     Covariate adjustment and the rank-based inverse normal transformations are currently supported
     only for phenotype and covariate matrices **without missing values**; the run aborts otherwise.
+
+## LOCO adjustment
+
+With `--loco`, the phenotype is adjusted for the polygenic background estimated by REGENIE
+step 1, following REGENIE step 2 for quantitative traits:
+
+1. RINT the raw phenotype if `--rint-before-adj` is set.
+2. Residualize the phenotype against the covariates (or just center it without `--cov`).
+3. Scale the residual to unit SD, with `SD = ||r|| / sqrt(N - n_cov)`, where `n_cov` counts the
+   intercept (REGENIE's `scale_Y`).
+4. Subtract the LOCO prediction for the chromosome of `--region`.
+5. RINT the result if `--rint-after-adj` is set. Otherwise, multiply it back by the SD from
+   step 3.
+
+Because of step 5, `BETA`, `SE`, the exported `--out-suff`/`--out-rss` statistics, and the SuSiE
+effect sizes stay in units of the covariate-adjusted phenotype, as REGENIE reports them.
+`TSTAT` and `LOG10P` do not depend on this rescaling. With `--rint-after-adj`, effects are on
+the RINT scale, as with REGENIE's `--apply-rerint`.
+
+A `.loco` file has a header `FID_IID <FID>_<IID> ...` and one row per chromosome (`1`-`22`,
+and `23` for X). The region's chromosome is matched after dropping a `chr` prefix, with X
+mapped to `23`. Sample IDs are matched to the `FID_IID` columns exactly, then as `<ID>_<ID>`,
+and then as a unique `<FID>_<ID>` suffix. Samples without a non-missing LOCO prediction for
+every tested trait are excluded, and a warning reports how many. In a `*_pred.list` file,
+relative paths that do not exist as given are resolved against the list file's directory.
+
+```bash
+qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
+    --traits T1,T2 --region chr2:1000000-2000000 \
+    --loco [regenie_step1]_pred.list --susie --out [out_prefix]
+```
+
+!!! warning
+    `--loco` currently requires a phenotype matrix without missing values.
 
 ## Expected Output
 
@@ -355,6 +390,7 @@ Available Options:
    --pheno                [STR: ]             : Input phenotype matrix
    --sample               [STR: ]             : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
    --cov                  [STR: ]             : Input covariate matrix (optional)
+   --loco                 [STR: ]             : REGENIE step-1 LOCO predictions: a .loco file (single trait) or a *_pred.list file (TRAIT PATH per line). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units
    --pheno-format         [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
    --cov-format           [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
    --traits               [STR: ]             : Trait IDs (comma-separated) to be tested (required)
