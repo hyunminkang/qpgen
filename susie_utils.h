@@ -62,24 +62,20 @@ struct SusieOptions {
     // Unmappable-effects model.
     //   NONE : standard SuSiE.
     //   INF  : SuSiE-inf; theta_j ~ N(0, tau2) with MoM variance components.
-    //   ASH  : SuSiE-ash; theta_j ~ sum_k pi_k * N(0, sa2_k * sigma2) with a fixed
-    //          log-spaced grid (Mr.ASH-style). Simplified port that skips the
-    //          LD-masking heuristics and slot-activity model to keep it fast.
+    //   ASH  : SuSiE-ash (SuSiE 2.0 manuscript, Algorithm 1); theta_j ~ sum_k pi_k
+    //          N(0, sigma2 * sa2_k) on a data-driven grid, fit by Mr.ASH, with the
+    //          SER run under Omega = (tau2 XX' + sigma2 I)^{-1}.
     enum UnmappableEffects { NONE, INF, ASH } unmappable_effects = NONE;
-    // ASH-only knobs (ignored otherwise).
-    int    ash_K            = 10;        // number of prior-variance grid components (incl. null)
-    double ash_sd_mult      = 2.0;       // successive sa2 components are sd_mult^2 x apart
-    int    ash_inner_max    = 200;       // max coord-ascent sweeps per outer iter
-    double ash_inner_tol    = 1e-3;      // loose inner tolerance; auto-tightened near outer conv.
-    // Reduction-test hook: fix pi to a specific vector and skip EM updates.
-    //   empty -> normal ash (EM-updated pi).
-    //   length K vector -> pi held at these values throughout; used to prove
-    //     ash reduces to standard SuSiE when pi=(1,0,...,0), and to SuSiE-inf
-    //     when pi has all mass on a single non-null grid component.
+    // ASH-only knobs (ignored otherwise): Mr.ASH inner fit, run to convergence in
+    // every outer iteration (mr.ash defaults: relative theta change 1e-4).
+    int    ash_inner_max    = 1000;      // max coordinate-ascent sweeps per outer iteration
+    double ash_inner_tol    = 1e-4;      // relative L2 change of theta
+    // Reduction-test hooks.
+    //   ash_fix_pi : hold pi at this vector (no EM update of pi); must match
+    //                the grid length, so give ash_fix_sa2 as well.
+    //   ash_fix_sa2: hold the sa2 grid (first entry should be 0) instead of the
+    //                data-driven grid rebuilt every iteration.
     std::vector<double> ash_fix_pi;
-    // Reduction-test hook: fix the sa2 grid and skip the data-driven rebuild.
-    //   empty -> data-driven grid (see fit_susie_ash step 3).
-    //   length matching ash_fix_pi -> sa2 grid held at these values.
     std::vector<double> ash_fix_sa2;
 };
 

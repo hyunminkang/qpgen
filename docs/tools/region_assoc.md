@@ -145,7 +145,7 @@ about 3 s for the first trait.
 * `--susie` : Run SuSiE fine-mapping for each tested trait in the region (default: off). Without this flag only the marginal association file is written.
 * `--susie-L` : Maximum number of causal single effects (default: 10). Effectively capped at the number of variants in the region.
 * `--susie-max-iter` : Maximum number of IBSS iterations (default: 100).
-* `--susie-tol` : Convergence tolerance for the SuSiE objective (default: 1e-3). For `--unmappable-effects inf` and `ash`, which converge on PIPs rather than the ELBO, a default of 1e-4 is used instead, matching `susieR`.
+* `--susie-tol` : Convergence tolerance for the SuSiE objective (default: 1e-3). For `--unmappable-effects inf` and `ash`, which converge on PIPs (`inf`) or `alpha` (`ash`) rather than the ELBO, a default of 1e-4 is used instead, matching `susieR`.
 * `--susie-coverage` : Target coverage of the credible sets (default: 0.95).
 * `--susie-min-abs-corr` : Minimum purity, i.e. the minimum absolute pairwise correlation among the members of a credible set, required to report it (default: 0.5). Sets below this threshold are dropped, as are duplicate sets.
 * `--susie-no-standardize` : Do not standardize genotype columns to unit variance before fitting. Columns are still mean-centered.
@@ -161,10 +161,35 @@ causal variants, or polygenic background within the region) are modeled. It matc
 |---|---|
 | `none` (default) | Standard SuSiE. |
 | `inf` | **SuSiE-inf**: adds an infinitesimal effect, `theta_j ~ N(0, tau2)`, with `(sigma2, tau2)` estimated by method of moments and `theta` obtained as its BLUP. Convergence is assessed on PIPs. |
-| `ash` | **SuSiE-ash**: `theta_j` gets a scale-mixture-of-normals prior, `sum_k pi_k * N(0, sa2_k * sigma2)`, over a fixed log-spaced grid whose first component is the null point mass, fit by Mr.ASH-style coordinate ascent with `pi` and `sigma2` estimated by EM. This is a simplified port that skips `susieR`'s LD-masking and slot-activity heuristics for speed. Convergence is assessed on PIPs. |
+| `ash` | **SuSiE-ash**, following Algorithm 1 of the SuSiE 2.0 manuscript (McCreight et al., bioRxiv 2025.11.25.690514). `theta_j` gets a scale-mixture-of-normals prior, `sum_k pi_k * N(0, sa2_k * sigma2)`. Each iteration runs the single-effect regressions under `Omega = (tau2 XX' + sigma2 I)^-1`, as in `inf`, then fits Mr.ASH to convergence on `y - X b_bar` (see below). Convergence is assessed on `alpha`. |
 
 For `inf` and `ash`, `tau2` is reported in the log and a per-variant `theta` column is added to
 the LBF output.
+
+**SuSiE-ash details.** After the single-effect regressions, each iteration:
+
+1. Estimates provisional `(sigma2, tau2_0)` by the same method of moments as `inf`. If `tau2_0`
+   is 0, it sets `theta = 0` and `tau2 = 0` and skips the remaining steps for that iteration.
+2. Builds the variance grid from `t = tau2_0 / sigma2`: a point mass at 0, 10 log-spaced points on
+   `[t/100, t/10]`, 6 on `[t/10, 3t]`, and 3 on `[3t, V_min/sigma2]`, where `V_min` is the
+   smallest prior variance among active single effects. Points within 10% of the previous one are
+   dropped.
+3. Fits Mr.ASH to convergence on `y - X b_bar`, starting from the previous `theta` and a uniform
+   `pi`. It updates `theta` by coordinate ascent, `pi_k` as the mean responsibility, and `sigma2`
+   with the Mr.ASH update (manuscript Supplementary Notes S3).
+4. Sets `tau2 = sigma2 * sum_k pi_k sa2_k` and refreshes `Omega`.
+
+The grid band sizes and the zero-`tau2_0` shortcut are not specified in the manuscript. They follow
+the `susieR` code from the time of the preprint (`initialize_mrash()`, December 2025). The
+implementation reproduces an independent R version of Algorithm 1 that uses `susieR`'s `mr.ash`
+to about 1e-11 in PIPs and `theta`.
+
+Current `susieR` releases differ from the manuscript. Their ash mode adds an LD-based masking
+layer, subtracts only "confident" effects before Mr.ASH, uses a fixed grid, and runs its
+single-effect regressions without `Omega`. In addition, the individual-level `susie()` path
+passes the unscaled, uncentered `X` to `mr.ash` together with standardized-scale effects, so it
+disagrees with `susie_ss()` unless `X` is standardized beforehand. `region-assoc` follows the
+manuscript, so results are not expected to match current `susieR` ash output.
 
 `inf` and `ash` start from a thin eigendecomposition of the standardized genotype matrix,
 taken on the smaller of `X'X` (p x p) or `XX'` (n x n), so the cost is
@@ -183,11 +208,10 @@ The backend actually loaded is detected at run time. It is shown in `region-asso
 As in `susieR`, single effects whose estimated prior variance is ~0 (`V <= 1e-9`) are treated
 as inactive: they contribute neither to the reported PIPs nor to credible sets.
 
-Two options exist purely for **reduction tests**, i.e. verifying that `ash` collapses onto the
-simpler models, and are ignored unless `--unmappable-effects ash` is given:
+Two options exist for diagnostics, and are ignored unless `--unmappable-effects ash` is given:
 
-* `--ash-fix-pi` : Comma-separated mixture weights held fixed (EM skipped). Setting `pi = 1,0,...,0` should reproduce `--unmappable-effects none`; putting all mass on a single non-null component should reproduce `inf`.
-* `--ash-fix-sa2` : Comma-separated prior-variance grid held fixed. Must have the same length as `--ash-fix-pi`.
+* `--ash-fix-sa2` : Comma-separated prior-variance grid, in units of `sigma2` with a first entry of 0, held fixed instead of the data-driven grid.
+* `--ash-fix-pi` : Comma-separated mixture weights held fixed (no `pi` update). Requires `--ash-fix-sa2` of the same length. With `pi = 1,0,...,0`, `theta` stays 0; because `sigma2` still comes from Mr.ASH rather than SuSiE's expected residual sum of squares, this is close to, but not identical to, `--unmappable-effects none`.
 
 ### Variants excluded from fine-mapping
 
@@ -489,9 +513,9 @@ Available Options:
    --susie-min-abs-corr   [FLT: 0.50]         : Minimum absolute correlation (purity) required to report a credible set (default: 0.5)
    --susie-tol            [FLT: 1.0e-03]      : Convergence tolerance for the SuSiE objective (default: 1e-3)
    --susie-no-standardize [FLG: OFF]          : Do not standardize genotype columns to unit variance before SuSiE
-   --unmappable-effects   [STR: none]         : Unmappable-effects model for SuSiE: 'none' (standard), 'inf' (SuSiE-inf, adds an infinitesimal effect), or 'ash' (SuSiE-ash, scale-mixture prior). Matches run_susie_v1.r --method (default: none)
-   --ash-fix-pi           [STR: ]             : Reduction test: comma-separated pi vector to hold ash mixture weights fixed (skips EM). Length K. Used with --unmappable-effects ash to prove ash reduces to none (pi=1,0,...,0) or inf (pi=0,...,0,1).
-   --ash-fix-sa2          [STR: ]             : Reduction test: comma-separated sa2 grid to hold ash prior-variance grid fixed. Length must match --ash-fix-pi.
+   --unmappable-effects   [STR: none]         : Unmappable-effects model for SuSiE: 'none' (standard), 'inf' (SuSiE-inf, adds an infinitesimal effect), or 'ash' (SuSiE-ash as in the SuSiE 2.0 manuscript, Algorithm 1: adaptive-shrinkage background fit by Mr.ASH, SER under the implied Omega) (default: none)
+   --ash-fix-pi           [STR: ]             : Diagnostics for --unmappable-effects ash: comma-separated mixture weights held fixed (no pi update). Requires --ash-fix-sa2 of the same length. pi=1,0,...,0 keeps theta=0 (sigma2 still comes from Mr.ASH, so this is close to, not identical to, --unmappable-effects none)
+   --ash-fix-sa2          [STR: ]             : Diagnostics for --unmappable-effects ash: comma-separated prior-variance grid (in units of sigma2, first entry 0) held fixed instead of the data-driven grid rebuilt every iteration
    --output-lbf           [FLG: OFF]          : Also write per-variant log Bayes factors (one column per single effect) when running SuSiE
 
 

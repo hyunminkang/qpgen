@@ -139,9 +139,9 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_DOUBLE_PARAM("susie-min-abs-corr", &susie_min_abs_corr, "Minimum absolute correlation (purity) required to report a credible set (default: 0.5)")
     LONG_DOUBLE_PARAM("susie-tol", &susie_tol, "Convergence tolerance for the SuSiE objective (default: 1e-3)")
     LONG_PARAM("susie-no-standardize", &susie_no_standardize, "Do not standardize genotype columns to unit variance before SuSiE")
-    LONG_STRING_PARAM("unmappable-effects", &unmappable_effects, "Unmappable-effects model for SuSiE: 'none' (standard), 'inf' (SuSiE-inf, adds an infinitesimal effect), or 'ash' (SuSiE-ash, scale-mixture prior). Matches run_susie_v1.r --method (default: none)")
-    LONG_STRING_PARAM("ash-fix-pi", &ash_fix_pi_str, "Reduction test: comma-separated pi vector to hold ash mixture weights fixed (skips EM). Length K. Used with --unmappable-effects ash to prove ash reduces to none (pi=1,0,...,0) or inf (pi=0,...,0,1).")
-    LONG_STRING_PARAM("ash-fix-sa2", &ash_fix_sa2_str, "Reduction test: comma-separated sa2 grid to hold ash prior-variance grid fixed. Length must match --ash-fix-pi.")
+    LONG_STRING_PARAM("unmappable-effects", &unmappable_effects, "Unmappable-effects model for SuSiE: 'none' (standard), 'inf' (SuSiE-inf, adds an infinitesimal effect), or 'ash' (SuSiE-ash as in the SuSiE 2.0 manuscript, Algorithm 1: adaptive-shrinkage background fit by Mr.ASH, SER under the implied Omega) (default: none)")
+    LONG_STRING_PARAM("ash-fix-pi", &ash_fix_pi_str, "Diagnostics for --unmappable-effects ash: comma-separated mixture weights held fixed (no pi update). Requires --ash-fix-sa2 of the same length. pi=1,0,...,0 keeps theta=0 (sigma2 still comes from Mr.ASH, so this is close to, not identical to, --unmappable-effects none)")
+    LONG_STRING_PARAM("ash-fix-sa2", &ash_fix_sa2_str, "Diagnostics for --unmappable-effects ash: comma-separated prior-variance grid (in units of sigma2, first entry 0) held fixed instead of the data-driven grid rebuilt every iteration")
     LONG_PARAM("output-lbf", &output_lbf, "Also write per-variant log Bayes factors (one column per single effect) when running SuSiE")
     END_LONG_PARAMS();
 
@@ -433,12 +433,10 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                 };
                 if ( !ash_fix_pi_str.empty() ) sopt.ash_fix_pi = parse_csv(ash_fix_pi_str);
                 if ( !ash_fix_sa2_str.empty() ) sopt.ash_fix_sa2 = parse_csv(ash_fix_sa2_str);
-                if ( !sopt.ash_fix_pi.empty() && !sopt.ash_fix_sa2.empty() &&
-                     sopt.ash_fix_pi.size() != sopt.ash_fix_sa2.size() ) {
+                if ( !sopt.ash_fix_pi.empty() && sopt.ash_fix_pi.size() != sopt.ash_fix_sa2.size() ) {
                     error("--ash-fix-pi (K=%d) and --ash-fix-sa2 (K=%d) must have the same length",
                           (int)sopt.ash_fix_pi.size(), (int)sopt.ash_fix_sa2.size());
                 }
-                if ( !sopt.ash_fix_pi.empty() ) sopt.ash_K = (int)sopt.ash_fix_pi.size();
             }
             else if ( unmappable_effects != "none" ) {
                 error("--unmappable-effects must be 'none', 'inf', or 'ash' (got '%s')", unmappable_effects.c_str());
