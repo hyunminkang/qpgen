@@ -25,7 +25,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string covf;
     std::string outf;
     std::string samplef;
-    std::string locof;      // REGENIE step-1 LOCO predictions (.loco file or *_pred.list)
+    std::string locof;      // REGENIE step-1 LOCO predictions of a single trait (.loco file)
+    std::string predf;      // REGENIE step-1 *_pred.list: [pheno_id] [path_to_loco] per line
 
     // information about the trait and variants to be tested
     std::string traits;   // assume that a single trait is being tested
@@ -52,6 +53,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     bool rint_after_adj = false; // Perform rank-based inverse normal transformation after covariate adjustment
     bool score_test = false;     // REGENIE-style score test (null-model variance, normal p-value) instead of the Wald t-test
     int32_t n_threads = 0;       // BLAS/LAPACK threads for SuSiE linear algebra (0 = library default)
+    std::string missing_str("NA"); // comma-separated strings marking missing phenotype/covariate values
 
     // SuSiE fine-mapping options
     bool run_susie = false;
@@ -91,8 +93,10 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("pheno", &phef, "Input phenotype matrix")
     LONG_STRING_PARAM("sample", &samplef, "Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files")
     LONG_STRING_PARAM("cov", &covf, "Input covariate matrix (optional)")
-    LONG_STRING_PARAM("loco", &locof, "REGENIE step-1 LOCO predictions: a .loco file (single trait) or a *_pred.list file (TRAIT PATH per line). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units")
+    LONG_STRING_PARAM("loco", &locof, "REGENIE step-1 LOCO predictions of a single trait (.loco file). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units. A *_pred.list file is also accepted here for backward compatibility")
+    LONG_STRING_PARAM("pred", &predf, "REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("missing-str", &missing_str, "Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). Missing phenotype values are allowed only when a single trait is tested; its samples with a missing value are excluded")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("traits", &traits, "Trait IDs (comma-separated) to be tested (required)")
     LONG_STRING_PARAM("traitf", &traitf, "Input file containing trait IDs to be tested (one per line)")
@@ -166,10 +170,17 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     input.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
     input.set_rint_before_adj(rint_before_adj);
     input.set_rint_after_adj(rint_after_adj);
+    input.set_drop_missing_pheno_samples(true); // a single trait may have missing values
     input.set_minmax_af(min_af, max_af);
     input.set_minmax_ac(min_ac, max_ac);
     cbe_t region_cbe(region.c_str());
-    if ( !locof.empty() ) {
+    if ( !locof.empty() && !predf.empty() ) {
+        error("Specify only one of --loco (single .loco file) and --pred (*_pred.list file)");
+    }
+    if ( !predf.empty() ) {
+        input.set_loco(predf.c_str(), region_cbe.chrom.c_str(), ind_assoc_input::LOCO_PRED_LIST);
+    }
+    else if ( !locof.empty() ) {
         input.set_loco(locof.c_str(), region_cbe.chrom.c_str());
     }
     if ( !samplef.empty() ) {
@@ -191,6 +202,11 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         error("Either --traits or --traitf must be provided");
     }
 
+    // register missing-value strings before the phenotype/covariate files are read,
+    // so they are detected instead of being parsed as 0
+    input.pheno_matrix.add_missing_strs(missing_str);
+    input.cov_matrix.add_missing_strs(missing_str);
+
     notice("Loading genotype data from pgen files with chromosome %s, position %d to %d, and maximum chunk size of %d variants", region.c_str(), 0, 0, max_allowed_vars);
     if ( !pgenlistf.empty() ) { // list is provided
         input.process_pgenlist(pgenlistf.c_str(), phef.c_str(), pheno_format.c_str(), covf.c_str(), cov_format.c_str());
@@ -203,8 +219,6 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     }    
 
     // read chunk of genotype based on the region
-    Eigen::MatrixXd geno_mat;
-    Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> geno_mask;
     notice("icol_pivar_idx: %d", input.mpr.get_icol_pivar_idx());
     // bool first = true;
     // bool any_loaded = false;
@@ -225,6 +239,31 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         input.pheno_matrix.pheno_mat.rowwise() -= pheno_means;
     }
 
+    // All traits must share one sample set so that every trait-independent
+    // quantity (standardized X, X'X, its eigendecomposition) is computed once per
+    // region. Traits with different missingness patterns would each need their
+    // own sample subset and covariate-residualized X, so missing phenotype values
+    // are allowed only when a single trait is analyzed; its samples with a missing
+    // value were already excluded while loading (set_drop_missing_pheno_samples).
+    const int32_t n_traits = (int32_t)input.pheno_matrix.pheno_ids.size();
+    if ( input.pheno_matrix.has_missing )
+        error("Unexpected missing phenotype values after sample matching (%d traits)", n_traits);
+
+    // ---- Region-level statistics, shared by the marginal test, the export and SuSiE ----
+    // The genotype matrix is moved (not copied) into a SuSiE design, which centers
+    // and, unless --susie-no-standardize, scales its columns in place and caches
+    // X'X / the eigendecomposition on first use. X'Y for all traits is one GEMM.
+    // Per-allele statistics follow from the column scales: x'x = s^2 * x_std'x_std
+    // and X'Y = diag(s) * X_std'Y (s = 0 for unusable columns, giving NaN results).
+    const Eigen::MatrixXd& Y = input.pheno_matrix.pheno_mat;       // n x K, centered
+    const int32_t n_samples = (int32_t)Y.rows();
+    susie::SusieDesign design(std::move(input.geno_chunk.geno_mat), !susie_no_standardize);
+    const Eigen::MatrixXd XtY_std = design.crossprod(Y);           // p x K, design scale
+    const Eigen::VectorXd& col_scale = design.col_scale();
+    const Eigen::VectorXd x_sq_norms = (col_scale.array().square() * design.xtx()).matrix();
+    const Eigen::MatrixXd XtY = col_scale.asDiagonal() * XtY_std;  // p x K, per allele
+    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
+
     // perform rectangular association analysis
     std::vector<std::vector<slr_sumstat_t> > rect_results;
     if ( score_test ) {
@@ -232,20 +271,13 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         // (and covariate-residualized when --cov is given)
         const int32_t n_cov = 1 + (int32_t)input.cov_matrix.pheno_mat.cols();
         notice("Performing rectangular association analysis with the score test (n_cov = %d including the intercept)...", n_cov);
-        if ( !simple_rect_score_test_without_missing(
-                input.pheno_matrix.pheno_mat,
-                input.geno_chunk.geno_mat,
-                n_cov,
-                rect_results) ) {
+        if ( !simple_rect_score_test_from_stats(n_samples, x_sq_norms, y_sq_norms, XtY, n_cov, rect_results) ) {
             error("Failed to perform rectangular association analysis");
         }
     }
     else {
         notice("Performing rectangular association analysis with the Wald t-test...");
-        if ( !simple_rect_regression_without_missing(
-                input.pheno_matrix.pheno_mat,
-                input.geno_chunk.geno_mat,
-                rect_results) ) {
+        if ( !simple_rect_regression_from_stats(n_samples, x_sq_norms, y_sq_norms, XtY, rect_results) ) {
             error("Failed to perform rectangular association analysis");
         }
     }
@@ -301,21 +333,16 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     // genotype matrix X and phenotype matrix Y used for the marginal test above,
     // so susieR::susie_rss(bhat, shat, R, n, var_y) on these files fits the
     // same model as the built-in --susie (Frisch-Waugh-Lovell residualization).
+    // X'X, X'y and y'y come from the shared region-level statistics above; X'X
+    // is the design's cached one (also used by SuSiE), rescaled to per allele.
     if ( out_suff || out_rss ) {
-        const Eigen::MatrixXd& X = input.geno_chunk.geno_mat;
-        const int32_t n = (int32_t)X.rows();
-        const int32_t p = (int32_t)X.cols();
-        const int32_t K = (int32_t)input.pheno_matrix.pheno_ids.size();
+        const int32_t n = n_samples;
+        const int32_t p = design.p();
+        const int32_t K = n_traits;
         if ( p == 0 ) {
             notice("Skipping --out-suff/--out-rss: no variants loaded in the region");
         }
         else {
-            // Y is already covariate-residualized (hence centered) when --cov is
-            // given; center explicitly so y'y is the centered sum of squares regardless.
-            Eigen::MatrixXd Y = input.pheno_matrix.pheno_mat;
-            Eigen::RowVectorXd y_means = Y.colwise().mean(); // evaluate first (no aliasing)
-            Y.rowwise() -= y_means;
-
             susie_export::RegionMeta meta;
             meta.region = region;
             meta.trait_ids = input.pheno_matrix.pheno_ids;
@@ -331,15 +358,12 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             }
 
             notice("Computing X'X for %d variants (%.2f GB per p x p matrix)...", p, (double)p * p * 8.0 / 1e9);
-            Eigen::MatrixXd XtX = Eigen::MatrixXd::Zero(p, p);
-            XtX.selfadjointView<Eigen::Lower>().rankUpdate(X.transpose());
-            XtX.triangularView<Eigen::StrictlyUpper>() = XtX.transpose();
+            const Eigen::MatrixXd XtX = col_scale.asDiagonal() * design.XtX() * col_scale.asDiagonal();
 
             if ( out_suff ) {
-                Eigen::MatrixXd Xty = X.transpose() * Y;                 // p x K
-                Eigen::VectorXd yty = Y.colwise().squaredNorm().transpose(); // K
+                const Eigen::VectorXd yty = y_sq_norms.transpose(); // K
                 std::string suff_path = outf + suff_suffix;
-                susie_export::write_suff_stats(suff_path.c_str(), meta, XtX, Xty, yty);
+                susie_export::write_suff_stats(suff_path.c_str(), meta, XtX, XtY, yty);
                 notice("Sufficient statistics (X'X, X'y, y'y, n=%d) written to %s", n, suff_path.c_str());
             }
             if ( out_rss ) {
@@ -353,7 +377,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                         shat(j, k) = ss.se;
                     }
                 }
-                Eigen::VectorXd var_y = Y.colwise().squaredNorm().transpose() / (double)(n - 1);
+                Eigen::VectorXd var_y = y_sq_norms.transpose() / (double)(n - 1);
                 std::string rss_path = outf + rss_suffix;
                 susie_export::write_rss_stats(rss_path.c_str(), meta, R, z, bhat, shat, var_y);
                 notice("RSS summary statistics (z, R, bhat, shat, var_y, n=%d) written to %s", n, rss_path.c_str());
@@ -366,7 +390,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     // matrix as the marginal association above, so the per-variant marginal BETA /
     // LOG10P (from rect_results) are matched directly into the credible-set output.
     if ( run_susie ) {
-        const int32_t n_pheno = (int32_t)input.pheno_matrix.pheno_ids.size();
+        const int32_t n_pheno = n_traits;
         const int32_t n_vars = input.geno_chunk.n_variants;
         if ( n_vars == 0 ) {
             notice("Skipping SuSiE: no variants loaded in the region");
@@ -376,7 +400,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             sopt.L = susie_L;
             sopt.max_iter = susie_max_iter;
             sopt.tol = susie_tol;
-            sopt.standardize = !susie_no_standardize;
+            sopt.standardize = !susie_no_standardize; // already applied by the shared design
 
             // Unmappable-effects model. "inf"/"ash" force PIP-based convergence
             // (they have no well-defined ELBO). Match susieR's default inf/ash
@@ -456,9 +480,10 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
                        blas_threads::backend().c_str(), blas_threads::threads_str().c_str());
             for(int32_t k = 0; k < n_pheno; ++k) {
                 const std::string& trait = input.pheno_matrix.pheno_ids[k];
-                Eigen::VectorXd y = input.pheno_matrix.pheno_mat.col(k);
-                susie::SusieResult res = susie::simple_susie_without_missing(
-                    y, input.geno_chunk.geno_mat, sopt, susie_coverage, susie_min_abs_corr);
+                // trait-specific work only: the design (standardized X, X'X or the
+                // eigendecomposition) is built once and shared by every trait
+                susie::SusieResult res = susie::fit_susie_trait(
+                    design, Y.col(k), XtY_std.col(k), sopt, susie_coverage, susie_min_abs_corr);
 
                 const char* tag = run_ash ? "SuSiE-ash" : (run_inf ? "SuSiE-inf" : "SuSiE");
                 if ( has_theta )

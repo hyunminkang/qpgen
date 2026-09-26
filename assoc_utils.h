@@ -66,16 +66,27 @@ public:
 
     // LOCO adjustment using REGENIE step-1 predictions (optional)
     std::string loco_file;  // REGENIE .loco file (single trait) or *_pred.list file (TRAIT PATH per line)
+    int32_t loco_kind;      // expected kind of loco_file: LOCO_ANY, LOCO_SINGLE or LOCO_PRED_LIST
     std::string loco_chrom; // chromosome whose leave-one-chromosome-out predictions are subtracted
     // Per-trait SD of the covariate-residualized phenotype used to standardize it before
     // subtracting the LOCO predictions (REGENIE's scale_Y). Empty unless LOCO is applied.
     Eigen::RowVectorXd pheno_scale;
+
+    // When true, a SINGLE tested trait may have missing values: samples whose
+    // phenotype is missing are excluded from the analyzed sample set (before the
+    // genotype, covariate and LOCO matching), so every downstream step runs on the
+    // observed samples. With several traits, missing values are an error, because
+    // all traits must share one sample set. Off by default (other commands keep
+    // their own missing-value handling).
+    bool drop_missing_pheno_samples;
 
     ind_assoc_input() {
         jump_thres_bp = 1000000;
         icol_pivar_idx = 8;
         rint_before_adj = false;
         rint_after_adj = false;
+        drop_missing_pheno_samples = false;
+        loco_kind = LOCO_ANY;
         geno_chunk_done = false;
     }
     ~ind_assoc_input() {}
@@ -90,17 +101,21 @@ public:
     }
     void set_rint_before_adj(bool val) { rint_before_adj = val; }
     void set_rint_after_adj(bool val) { rint_after_adj = val; }
+    void set_drop_missing_pheno_samples(bool val) { drop_missing_pheno_samples = val; }
 
     // Enable LOCO adjustment. Must be called before the phenotype matrix is loaded.
     // locof: a REGENIE .loco file (header starting with FID_IID) when a single trait is tested,
     //        or a REGENIE *_pred.list file mapping each trait to its .loco file.
     // chrom: chromosome of the tested region (e.g. "chr1", "1", "chrX"); X maps to 23.
-    void set_loco(const char* locof, const char* chrom) {
+    // kind : LOCO_ANY detects the file type; LOCO_SINGLE / LOCO_PRED_LIST require it.
+    enum { LOCO_ANY = 0, LOCO_SINGLE = 1, LOCO_PRED_LIST = 2 };
+    void set_loco(const char* locof, const char* chrom, int32_t kind = LOCO_ANY) {
         if ( is_pheno_loaded() ) {
             error("Cannot set LOCO file after the phenotype matrix is loaded");
         }
         loco_file = locof;
         loco_chrom = chrom;
+        loco_kind = kind;
     }
     bool use_loco() const { return !loco_file.empty(); }
 
@@ -191,6 +206,17 @@ bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& X,
     std::vector<std::vector<slr_sumstat_t> >& results);
 
+// Same Wald t-test from precomputed statistics, so callers that already hold
+// them (e.g. region-assoc, which shares X'Y with SuSiE and the export) avoid a
+// second pass over X: n samples, x_sq_norms = diag(X'X) (p), y_sq_norms =
+// diag(Y'Y) (K), xt_y = X'Y (p x K).
+bool simple_rect_regression_from_stats(
+    int n,
+    const Eigen::VectorXd& x_sq_norms,
+    const Eigen::RowVectorXd& y_sq_norms,
+    const Eigen::MatrixXd& xt_y,
+    std::vector<std::vector<slr_sumstat_t> >& results);
+
 // -log10 of the two-sided standard normal p-value for a z statistic
 double zstat2log10pval(double zstat);
 
@@ -200,6 +226,15 @@ double zstat2log10pval(double zstat);
 bool simple_rect_score_test_without_missing(
     const Eigen::MatrixXd& Y,
     const Eigen::MatrixXd& X,
+    int32_t n_cov,
+    std::vector<std::vector<slr_sumstat_t> >& results);
+
+// Same score test from precomputed statistics (see simple_rect_regression_from_stats).
+bool simple_rect_score_test_from_stats(
+    int n,
+    const Eigen::VectorXd& x_sq_norms,
+    const Eigen::RowVectorXd& y_sq_norms,
+    const Eigen::MatrixXd& xt_y,
     int32_t n_cov,
     std::vector<std::vector<slr_sumstat_t> >& results);
 

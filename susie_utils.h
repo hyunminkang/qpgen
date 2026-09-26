@@ -57,7 +57,7 @@ struct SusieOptions {
     double scaled_prior_variance = 0.2;   // prior var = var(y)*this (init/fixed)
     double prior_v_min  = 1e-9;
     double prior_v_max  = 1e3;
-    bool   standardize  = true;           // scale X columns to unit variance (a copy)
+    bool   standardize  = true;           // scale X columns to unit variance (SusieDesign)
     enum ConvergenceMethod { ELBO, PIP } convergence_method = ELBO;
     // Unmappable-effects model.
     //   NONE : standard SuSiE.
@@ -95,27 +95,92 @@ struct CredibleSet {
     double V;                        // estimated prior variance of this single effect
 };
 
-// Fit standard SuSiE. Preconditions: X columns centered (and, if opt.standardize
-// is false, already scaled); y centered; no missing; no intercept column.
-SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt = SusieOptions());
+// Thin eigendecomposition X = U D V' of a design (variant-space part only).
+struct ThinEigen {
+    VectorXd eigval;   // r      d_k^2 (components with ~0 singular value dropped)
+    MatrixXd Vmat;     // p x r  variant-space eigenvectors (susieR's svd$v)
+};
 
-// Fit SuSiE-inf (unmappable_effects = "inf"). Same preconditions as fit_susie:
-// X columns centered+standardized, y centered. Adds an infinitesimal effect via
-// the eigenspace (thin SVD / Gram) Omega = (tau2 XX' + sigma2 I)^{-1} formulation,
-// estimating (sigma2, tau2) by method of moments and theta as its BLUP.
-SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt = SusieOptions());
+// Region-level design shared by every trait analyzed on the SAME samples.
+//
+// All trait-independent work lives here and is done once per region, not once
+// per trait: centering/standardizing X, screening unusable columns, X'X, and
+// the eigendecomposition used by SuSiE-inf/ash. X'X and the eigendecomposition
+// are built on first use and cached. Traits then only need X'y (for a block of
+// traits, one GEMM via crossprod()) and their own IBSS iterations.
+//
+// Traits with different missingness patterns have different sample sets (and,
+// after covariate residualization, different X), so they cannot share a design;
+// region-assoc therefore allows missing phenotype values only for a single trait.
+class SusieDesign {
+public:
+    // Takes ownership of X (n x p), e.g. std::move(geno_mat). In place, every
+    // column is centered and, if standardize, scaled to unit variance (sd with
+    // n-1). Columns with non-finite values or zero variance are zeroed and
+    // reported once via notice(); they get zero prior weight in every fit.
+    SusieDesign(MatrixXd&& X, bool standardize);
 
-// Fit SuSiE-ash (simplified port of susieR unmappable_effects = "ash"). theta_j
+    int n() const { return (int)X_.rows(); }
+    int p() const { return (int)X_.cols(); }
+    const MatrixXd& X() const { return X_; }
+    // diag(X'X) of the design (0 for unusable columns)
+    const ArrayXd& xtx() const { return xtx_; }
+    // input column j (centered) = design column j * col_scale(j): the sd when
+    // standardized, 1 otherwise, 0 for unusable columns. Converts design-scale
+    // statistics back to the per-allele scale (X'y, x'x, X'X).
+    const VectorXd& col_scale() const { return col_scale_; }
+    int n_unusable() const { return n_unusable_; }
+
+    // X'Y (p x K) for a block of traits sharing these samples: one GEMM.
+    MatrixXd crossprod(const MatrixXd& Y) const;
+
+    // Cached p x p X'X of the design (full symmetric). Built on first call.
+    const MatrixXd& XtX();
+    bool has_XtX() const { return has_XtX_; }
+
+    // Cached thin eigendecomposition of the design, taken on the smaller of
+    // X'X (reusing the cached one) or XX'. Built on first call.
+    const ThinEigen& thin_eigen();
+
+private:
+    MatrixXd X_;
+    ArrayXd  xtx_;
+    VectorXd col_scale_;
+    int      n_unusable_ = 0;
+    bool     has_XtX_ = false;
+    MatrixXd XtX_;
+    bool     has_eigen_ = false;
+    ThinEigen eigen_;
+};
+
+// Per-trait fits on a shared design. y is the centered phenotype (no missing
+// values, same samples as the design) and Xty = d.X()' y (see crossprod()).
+//
+// Standard SuSiE: when p <= n it runs on the design's cached X'X (sufficient
+// statistics, like susieR's susie_ss); otherwise on X directly.
+SusieFit fit_susie(SusieDesign& d, const VectorXd& y, const VectorXd& Xty,
+                   const SusieOptions& opt = SusieOptions());
+
+// SuSiE-inf (unmappable_effects = "inf"). Adds an infinitesimal effect via the
+// eigenspace Omega = (tau2 XX' + sigma2 I)^{-1} formulation, estimating
+// (sigma2, tau2) by method of moments and theta as its BLUP. Uses the design's
+// cached eigendecomposition.
+SusieFit fit_susie_inf(SusieDesign& d, const VectorXd& y, const VectorXd& Xty,
+                       const SusieOptions& opt = SusieOptions());
+
+// SuSiE-ash (simplified port of susieR unmappable_effects = "ash"). theta_j
 // has a scale-mixture-of-normals prior sum_k pi_k * N(0, sa2_k * sigma2) fit by
 // Mr.ASH coordinate ascent. The grid is fixed and log-spaced (first component
 // is the null point mass); pi and sigma2 are estimated by EM. Skips susieR's
 // LD-masking and slot-activity heuristics for speed.
-SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt = SusieOptions());
+SusieFit fit_susie_ash(SusieDesign& d, const VectorXd& y, const VectorXd& Xty,
+                       const SusieOptions& opt = SusieOptions());
 
-// Extract credible sets from a fit. X_std must be the (standardized) design matrix
-// actually used by fit_susie, so correlations/purity are computed consistently.
-// Sets whose purity < min_abs_corr are dropped; duplicate sets are removed.
-std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, const MatrixXd& X_std,
+// Extract credible sets from a fit on design d. Purity (minimum absolute
+// correlation) is read from the cached X'X when available, otherwise computed
+// from the sampled columns of X. Sets whose purity < min_abs_corr are dropped;
+// duplicate sets are removed.
+std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, SusieDesign& d,
                                       double coverage = 0.95, double min_abs_corr = 0.5);
 
 // Bundle of everything a caller typically wants.
@@ -124,11 +189,17 @@ struct SusieResult {
     std::vector<CredibleSet> cs;
 };
 
-// High-level entry point requested by callers: run SuSiE fine-mapping of a single
-// (covariate-adjusted, non-missing) phenotype against a genotype matrix.
-//   pheno_vec : length-n phenotype (residuals after covariate adjustment); centered internally
-//   geno_mat  : n x p genotype matrix (e.g. mean-centered dosages); a standardized copy is used
-// Additional behavior is controlled through SusieOptions and the CS parameters.
+// Fit one trait on a shared design with the model chosen by
+// opt.unmappable_effects, and extract its credible sets. pheno_vec is centered
+// internally (Xty is unaffected, as the design columns are centered).
+SusieResult fit_susie_trait(SusieDesign& d, const VectorXd& pheno_vec, const VectorXd& Xty,
+                            const SusieOptions& opt = SusieOptions(),
+                            double coverage = 0.95, double min_abs_corr = 0.5);
+
+// Single-trait convenience entry point: builds a design from a copy of geno_mat
+// (n x p, e.g. mean-centered dosages) and fits pheno_vec (covariate-adjusted,
+// non-missing). For several traits on the same samples, build one SusieDesign
+// and call fit_susie_trait() per trait instead.
 SusieResult simple_susie_without_missing(const VectorXd& pheno_vec,
                                          const MatrixXd& geno_mat,
                                          const SusieOptions& opt = SusieOptions(),

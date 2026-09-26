@@ -225,12 +225,13 @@ static SER single_effect_regression(const ArrayXd& xtr,
 // IBSS fit
 // ---------------------------------------------------------------------------
 
-SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt) {
-    const int n = X.rows();
-    const int p = X.cols();
+SusieFit fit_susie(SusieDesign& d, const VectorXd& y, const VectorXd& Xty, const SusieOptions& opt) {
+    const MatrixXd& X = d.X();
+    const int n = d.n();
+    const int p = d.p();
     const int L = std::max(1, std::min(opt.L, p));
 
-    ArrayXd xtx = X.array().square().colwise().sum();
+    ArrayXd xtx = d.xtx();
     // Columns with no variance (monomorphic, or fully explained by the covariates
     // after the Frisch-Waugh-Lovell residualization) carry no information. They must
     // be given zero prior weight rather than merely a guarded x'x: dividing by a
@@ -267,27 +268,20 @@ SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt
     VectorXd b_bar = VectorXd::Zero(p);
 
     // Two equivalent ways to form X'r_l for each single effect, picked by shape:
-    //   p <= n : sufficient statistics (as susieR's susie_ss). X'X and X'y are
-    //            formed once (multithreaded BLAS when available), and each effect
-    //            then costs ONE p x p product: X'r_l = X'y - X'X b_bar + X'X b_l.
+    //   p <= n : sufficient statistics (as susieR's susie_ss). X'X is the design's
+    //            cached one (formed once per region, multithreaded BLAS when
+    //            available), and each effect then costs ONE p x p product:
+    //            X'r_l = X'y - X'X b_bar + X'X b_l.
     //   n <  p : individual-level, with X b_l cached per effect so each effect
     //            costs two n x p products (X'r_l, then X b_l for the update).
     // Either way the ERSS needs no further passes over X. (Recomputing the
     // residual and every ||X b_l||^2 from scratch took ~3L+1 passes over the n x p
     // matrix per iteration, far slower than SuSiE-inf's eigenspace updates.)
     const bool use_suff = (p <= n);
-    MatrixXd XtX;                    // p x p (use_suff)
-    VectorXd Xty;                    // p     (use_suff)
-    MatrixXd Q;                      // use_suff ? X'X b_l (p x L) : X b_l (n x L)
+    static const MatrixXd empty;
+    const MatrixXd& XtX = use_suff ? d.XtX() : empty;   // p x p (use_suff)
+    MatrixXd Q = MatrixXd::Zero(use_suff ? p : n, L);  // use_suff ? X'X b_l : X b_l
     const double yty = y.squaredNorm();
-    if (use_suff) {
-        sym_crossprod_lower(X, true, XtX);
-        XtX.triangularView<Eigen::StrictlyUpper>() = XtX.transpose(); // full symmetric for GEMV
-        Xty = X.transpose() * y;
-        Q = MatrixXd::Zero(p, L);
-    } else {
-        Q = MatrixXd::Zero(n, L);
-    }
 
     SusieFit fit; fit.converged = false; fit.niter = 0;
     double obj_prev = -std::numeric_limits<double>::infinity();
@@ -417,32 +411,92 @@ static double susie_inf_optimize_V(const ArrayXd& pw, const ArrayXd& res,
     return v_best;
 }
 
-// Thin eigendecomposition of the (standardized) design, X = U D V', shared by
-// SuSiE-inf and SuSiE-ash. Equivalent to susieR's svd(X) path: only the
-// variant-space eigenvectors V, the eigenvalues d^2 and V'X'y are needed.
+// ---------------------------------------------------------------------------
+// SusieDesign: trait-independent, region-level work
+// ---------------------------------------------------------------------------
+
+SusieDesign::SusieDesign(MatrixXd&& X, bool standardize) : X_(std::move(X)) {
+    const int n = (int)X_.rows();
+    const int p = (int)X_.cols();
+    xtx_.setZero(p);
+    col_scale_.setZero(p);
+
+    // Every single-effect regression shares one residual and one softmax across all p
+    // variables, so a single bad column contaminates the entire fit rather than just
+    // its own coefficient (unlike the marginal per-variant regressions, which stay
+    // correct for every other variant). Two kinds of bad column are screened here:
+    //   - non-finite entries (e.g. a NaN dosage that survived mean-imputation);
+    //   - zero variance (monomorphic in the analyzed samples, an imputed variant with
+    //     an identical dosage for everybody, or a variant fully explained by the
+    //     covariates after the FWL residualization).
+    // Both are zeroed out and reported; the fits then give them zero prior weight
+    // so their PIP/alpha are 0 and the remaining variants are fit normally.
+    int n_nonfinite_cols = 0, n_novar_cols = 0;
+    std::vector<int> bad_cols;
+    for (int j = 0; j < p; ++j) {
+        bool finite = X_.col(j).allFinite();
+        double mean = finite ? X_.col(j).mean() : 0.0;
+        double ss   = finite ? (X_.col(j).array() - mean).square().sum() : 0.0;
+        double sd   = std::sqrt(ss / std::max(1, n - 1));
+        if (!finite || !(ss > 0.0) || !(sd > 0.0)) {
+            if (!finite) ++n_nonfinite_cols; else ++n_novar_cols;
+            if ((int)bad_cols.size() < 10) bad_cols.push_back(j);
+            X_.col(j).setZero();
+            continue;
+        }
+        if (standardize) { X_.col(j) = (X_.col(j).array() - mean) / sd; col_scale_(j) = sd; }
+        else             { X_.col(j) = X_.col(j).array() - mean;        col_scale_(j) = 1.0; }
+        xtx_(j) = X_.col(j).squaredNorm();
+    }
+    n_unusable_ = n_nonfinite_cols + n_novar_cols;
+    if (n_unusable_ > 0) {
+        std::string idx;
+        for (size_t i = 0; i < bad_cols.size(); ++i) {
+            if (i) idx += ",";
+            idx += std::to_string(bad_cols[i]);
+        }
+        if ((int)bad_cols.size() < n_unusable_) idx += ",...";
+        notice("SuSiE: excluding %d of %d variants with no usable genotype variance "
+               "(%d with non-finite values, %d monomorphic/collinear-with-covariates); "
+               "0-based column indices: %s",
+               n_unusable_, p, n_nonfinite_cols, n_novar_cols, idx.c_str());
+    }
+}
+
+MatrixXd SusieDesign::crossprod(const MatrixXd& Y) const {
+    MatrixXd XtY;
+    gemm_tn(X_, Y, XtY);
+    return XtY;
+}
+
+const MatrixXd& SusieDesign::XtX() {
+    if (!has_XtX_) {
+        sym_crossprod_lower(X_, true, XtX_);
+        XtX_.triangularView<Eigen::StrictlyUpper>() = XtX_.transpose(); // full symmetric for GEMV
+        has_XtX_ = true;
+    }
+    return XtX_;
+}
+
+// Thin eigendecomposition of the design, X = U D V', shared by SuSiE-inf and
+// SuSiE-ash (and by every trait on this design). Equivalent to susieR's svd(X)
+// path: only the variant-space eigenvectors V and the eigenvalues d^2 are needed.
 //
 // The decomposition is taken on whichever cross-product is SMALLER:
-//   p <= n : X'X (p x p), whose eigenvectors are V directly;
+//   p <= n : X'X (p x p, the cached one), whose eigenvectors are V directly;
 //   n <  p : XX' (n x n), with V = X'U D^{-1} formed by a single GEMM.
 // This keeps the cost at O(n p min(n,p) + min(n,p)^3), like a thin SVD. (Always
 // using the n x n Gram matrix made the cost O(n^3) and the memory O(n^2) even
 // for a handful of variants, e.g. ~8 min at n = 10K, p = 50.) Components with
 // ~0 singular value contribute ~0 everywhere and are dropped.
-struct ThinEigen {
-    VectorXd eigval;   // r    d_k^2
-    MatrixXd Vmat;     // p x r variant-space eigenvectors (susieR's svd$v)
-    VectorXd VtXty;    // r    V' X' y
-    VectorXd Xty;      // p    X' y
-};
-
-static ThinEigen thin_eigen_decomposition(const MatrixXd& X, const VectorXd& y) {
-    const int n = (int)X.rows();
-    const int p = (int)X.cols();
-    const bool variant_space = (p <= n);
-    const int m = variant_space ? p : n;
+const ThinEigen& SusieDesign::thin_eigen() {
+    if (has_eigen_) return eigen_;
+    const bool variant_space = (p() <= n());
+    const int m = variant_space ? p() : n();
 
     MatrixXd C;
-    sym_crossprod_lower(X, variant_space, C);        // m x m, lower triangle
+    if (variant_space) C = XtX();                    // copy: the solver overwrites it
+    else               sym_crossprod_lower(X_, false, C);
     VectorXd evals;                                  // ascending
     sym_eigen_inplace(C, evals);                     // C <- eigenvectors
 
@@ -451,40 +505,37 @@ static ThinEigen thin_eigen_decomposition(const MatrixXd& X, const VectorXd& y) 
     for (int k = 0; k < m; ++k) if (evals(k) > ev_tol) keep.push_back(k);
     const int r = (int)keep.size();
 
-    ThinEigen te;
-    te.eigval.resize(r);
+    eigen_.eigval.resize(r);
     MatrixXd E(m, r);                                // kept eigenvectors of C
     for (int idx = 0; idx < r; ++idx) {
-        te.eigval(idx) = evals(keep[idx]);
+        eigen_.eigval(idx) = evals(keep[idx]);
         E.col(idx) = C.col(keep[idx]);
     }
     C.resize(0, 0);
-    te.Xty = X.transpose() * y;
     if (variant_space) {
-        te.Vmat = std::move(E);
-        te.VtXty = te.Vmat.transpose() * te.Xty;
+        eigen_.Vmat = std::move(E);
     } else {
-        // V = X'U D^{-1};  V'X'y = D U'y
-        const ArrayXd d = te.eigval.array().sqrt();
-        gemm_tn(X, E, te.Vmat);
-        te.Vmat.array().rowwise() /= d.transpose();
-        te.VtXty = d * (E.transpose() * y).array();
+        // V = X'U D^{-1}
+        const ArrayXd dk = eigen_.eigval.array().sqrt();
+        gemm_tn(X_, E, eigen_.Vmat);
+        eigen_.Vmat.array().rowwise() /= dk.transpose();
     }
-    return te;
+    has_eigen_ = true;
+    return eigen_;
 }
 
-SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt) {
-    const int n = (int)X.rows();
-    const int p = (int)X.cols();
+SusieFit fit_susie_inf(SusieDesign& d, const VectorXd& y, const VectorXd& Xty, const SusieOptions& opt) {
+    const MatrixXd& X = d.X();
+    const int n = d.n();
+    const int p = d.p();
     const int L = std::max(1, std::min(opt.L, p));
     const double var_y = y.squaredNorm() / std::max(1, n - 1); // y is pre-centered
 
-    // --- thin eigendecomposition of standardized X (see thin_eigen_decomposition) ---
-    ThinEigen te = thin_eigen_decomposition(X, y);
+    // --- thin eigendecomposition of the design (cached, shared by all traits) ---
+    const ThinEigen& te = d.thin_eigen();
     const VectorXd& eigval = te.eigval;             // d_k^2
     const MatrixXd& Vmat   = te.Vmat;               // p x r
-    const VectorXd& VtXty  = te.VtXty;              // r
-    const VectorXd& Xty    = te.Xty;                // p
+    const VectorXd VtXty   = Vmat.transpose() * Xty; // r (trait-specific)
     MatrixXd Vsq = Vmat.array().square();           // p x r
     const double yty = y.squaredNorm();
     ArrayXd logpi = ArrayXd::Constant(p, -std::log((double)p));
@@ -730,24 +781,24 @@ static void mom_variance_components(
     else                              { sigma2 = std::max(x1 / n, var_y_floor); tau2 = 0.0; }
 }
 
-SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt) {
-    const int n = (int)X.rows();
-    const int p = (int)X.cols();
+SusieFit fit_susie_ash(SusieDesign& d, const VectorXd& y, const VectorXd& Xty, const SusieOptions& opt) {
+    const MatrixXd& X = d.X();
+    const int n = d.n();
+    const int p = d.p();
     const int L = std::max(1, std::min(opt.L, p));
     const bool fix_pi = !opt.ash_fix_pi.empty();
     const int K = fix_pi ? (int)opt.ash_fix_pi.size() : std::max(2, opt.ash_K);
     const double var_y = y.squaredNorm() / std::max(1, n - 1);
 
-    // --- thin eigendecomposition of standardized X (same as fit_susie_inf) ---
-    ThinEigen te = thin_eigen_decomposition(X, y);
+    // --- thin eigendecomposition of the design (cached, same as fit_susie_inf) ---
+    const ThinEigen& te = d.thin_eigen();
     const VectorXd& eigval = te.eigval;
     const MatrixXd& Vmat   = te.Vmat;
-    const VectorXd& VtXty  = te.VtXty;
-    const VectorXd& Xty    = te.Xty;
+    const VectorXd VtXty   = Vmat.transpose() * Xty;
     MatrixXd Vsq = Vmat.array().square();
     const double yty = y.squaredNorm();
     ArrayXd logpi_ser = ArrayXd::Constant(p, -std::log((double)p));
-    ArrayXd xtx = X.array().square().colwise().sum();
+    ArrayXd xtx = d.xtx();
     for (int j = 0; j < p; ++j) if (xtx(j) <= 0.0) xtx(j) = std::numeric_limits<double>::infinity();
 
     // --- SER state ---
@@ -943,10 +994,10 @@ SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions&
 // Credible sets
 // ---------------------------------------------------------------------------
 
-// Minimum absolute correlation among a set of (standardized) columns of X_std.
-// For large sets the estimate is based on a random subsample of up to 100 columns
-// (mirrors susieR's get_purity()).
-static double set_purity(const std::vector<int32_t>& vars, const MatrixXd& X_std) {
+// Minimum absolute correlation among a set of design columns. For large sets the
+// estimate is based on a random subsample of up to 100 columns (mirrors
+// susieR's get_purity()).
+static double set_purity(const std::vector<int32_t>& vars, SusieDesign& d) {
     const int k = (int)vars.size();
     if (k <= 1) return 1.0;
 
@@ -957,13 +1008,20 @@ static double set_purity(const std::vector<int32_t>& vars, const MatrixXd& X_std
         use.resize(100);
     }
     const int m = (int)use.size();
-    // All pairwise inner products in one symmetric rank-n update (BLAS dsyrk when
-    // available) instead of m(m-1)/2 separate length-n dot products, each of which
-    // also recomputed both column norms: ~15K passes over n samples per set.
-    MatrixXd Xs(X_std.rows(), m);
-    for (int i = 0; i < m; ++i) Xs.col(i) = X_std.col(use[i]);
-    MatrixXd G;
-    sym_crossprod_lower(Xs, true, G);                // m x m, lower triangle
+    // Pairwise inner products: looked up in the cached X'X when the design has
+    // one, otherwise one symmetric rank-n update over the sampled columns (BLAS
+    // dsyrk when available) rather than m(m-1)/2 separate length-n dot products.
+    MatrixXd G(m, m);
+    if (d.has_XtX()) {
+        const MatrixXd& XtX = d.XtX();
+        for (int j = 0; j < m; ++j)
+            for (int i = j; i < m; ++i) G(i, j) = XtX(use[i], use[j]);
+    } else {
+        const MatrixXd& X = d.X();
+        MatrixXd Xs(X.rows(), m);
+        for (int i = 0; i < m; ++i) Xs.col(i) = X.col(use[i]);
+        sym_crossprod_lower(Xs, true, G);            // m x m, lower triangle
+    }
     double min_abs = 1.0;
     for (int j = 0; j < m; ++j) {
         for (int i = j + 1; i < m; ++i) {
@@ -976,7 +1034,7 @@ static double set_purity(const std::vector<int32_t>& vars, const MatrixXd& X_std
     return min_abs;
 }
 
-std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, const MatrixXd& X_std,
+std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, SusieDesign& d,
                                       double coverage, double min_abs_corr) {
     std::vector<CredibleSet> out;
     const int L = (int)fit.alpha.rows();
@@ -1011,7 +1069,7 @@ std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, const MatrixXd& X_std
 
         // an effect that explains nothing spreads alpha ~ uniformly; its set will be
         // large with low purity and is filtered out below.
-        double purity = set_purity(vars, X_std);
+        double purity = set_purity(vars, d);
         if (purity < min_abs_corr) continue;
 
         // de-duplicate: skip if an identical set was already reported
@@ -1041,70 +1099,36 @@ std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, const MatrixXd& X_std
 // High-level wrapper
 // ---------------------------------------------------------------------------
 
+SusieResult fit_susie_trait(SusieDesign& d, const VectorXd& pheno_vec, const VectorXd& Xty,
+                            const SusieOptions& opt, double coverage, double min_abs_corr) {
+    if (pheno_vec.size() != d.n() || Xty.size() != d.p())
+        error("fit_susie_trait(): dimension mismatch (y has %d rows, X'y has %d rows; design is %d x %d)",
+              (int)pheno_vec.size(), (int)Xty.size(), d.n(), d.p());
+    // center the phenotype (covariates already regressed out by the caller);
+    // X'y is unchanged because the design columns are centered
+    VectorXd y = pheno_vec.array() - pheno_vec.mean();
+    if (!y.allFinite())
+        error("fit_susie_trait(): the phenotype vector contains non-finite values");
+
+    SusieResult res;
+    if (opt.unmappable_effects == SusieOptions::INF)
+        res.fit = fit_susie_inf(d, y, Xty, opt);
+    else if (opt.unmappable_effects == SusieOptions::ASH)
+        res.fit = fit_susie_ash(d, y, Xty, opt);
+    else
+        res.fit = fit_susie(d, y, Xty, opt);
+    res.cs = susie_get_cs(res.fit, d, coverage, min_abs_corr);
+    return res;
+}
+
 SusieResult simple_susie_without_missing(const VectorXd& pheno_vec,
                                          const MatrixXd& geno_mat,
                                          const SusieOptions& opt,
                                          double coverage,
                                          double min_abs_corr) {
-    const int n = (int)geno_mat.rows();
-    const int p = (int)geno_mat.cols();
-
-    // center the phenotype (covariates already regressed out by the caller)
-    VectorXd y = pheno_vec.array() - pheno_vec.mean();
-    if (!y.allFinite())
-        error("simple_susie_without_missing(): the phenotype vector contains non-finite values");
-
-    // Work on a standardized copy of X so the caller's matrix is left untouched.
-    //
-    // Every single-effect regression shares one residual and one softmax across all p
-    // variables, so a single bad column contaminates the entire fit rather than just
-    // its own coefficient (unlike the marginal per-variant regressions, which stay
-    // correct for every other variant). Two kinds of bad column are screened here:
-    //   - non-finite entries (e.g. a NaN dosage that survived mean-imputation);
-    //   - zero variance (monomorphic in the analyzed samples, an imputed variant with
-    //     an identical dosage for everybody, or a variant fully explained by the
-    //     covariates after the FWL residualization).
-    // Both are zeroed out and reported; fit_susie() then gives them zero prior weight
-    // so their PIP/alpha are 0 and the remaining variants are fit normally.
-    MatrixXd X = geno_mat;
-    int n_nonfinite_cols = 0, n_novar_cols = 0;
-    std::vector<int> bad_cols;
-    for (int j = 0; j < p; ++j) {
-        bool finite = X.col(j).allFinite();
-        double mean = finite ? X.col(j).mean() : 0.0;
-        double ss   = finite ? (X.col(j).array() - mean).square().sum() : 0.0;
-        double sd   = std::sqrt(ss / std::max(1, n - 1));
-        if (!finite || !(ss > 0.0) || !(sd > 0.0)) {
-            if (!finite) ++n_nonfinite_cols; else ++n_novar_cols;
-            if ((int)bad_cols.size() < 10) bad_cols.push_back(j);
-            X.col(j).setZero();
-            continue;
-        }
-        if (opt.standardize) X.col(j) = (X.col(j).array() - mean) / sd;
-        else                 X.col(j) = X.col(j).array() - mean; // at least center
-    }
-    if (n_nonfinite_cols + n_novar_cols > 0) {
-        std::string idx;
-        for (size_t i = 0; i < bad_cols.size(); ++i) {
-            if (i) idx += ",";
-            idx += std::to_string(bad_cols[i]);
-        }
-        if ((int)bad_cols.size() < n_nonfinite_cols + n_novar_cols) idx += ",...";
-        notice("SuSiE: excluding %d of %d variants with no usable genotype variance "
-               "(%d with non-finite values, %d monomorphic/collinear-with-covariates); "
-               "0-based column indices: %s",
-               n_nonfinite_cols + n_novar_cols, p, n_nonfinite_cols, n_novar_cols, idx.c_str());
-    }
-
-    SusieResult res;
-    if (opt.unmappable_effects == SusieOptions::INF)
-        res.fit = fit_susie_inf(X, y, opt);
-    else if (opt.unmappable_effects == SusieOptions::ASH)
-        res.fit = fit_susie_ash(X, y, opt);
-    else
-        res.fit = fit_susie(X, y, opt);
-    res.cs = susie_get_cs(res.fit, X, coverage, min_abs_corr);
-    return res;
+    SusieDesign d(MatrixXd(geno_mat), opt.standardize);
+    VectorXd Xty = d.X().transpose() * pheno_vec;
+    return fit_susie_trait(d, pheno_vec, Xty, opt, coverage, min_abs_corr);
 }
 
 } // namespace susie

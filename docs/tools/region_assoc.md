@@ -47,9 +47,11 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
 
 * `--cov` : Input covariate matrix in Regenie or TSV format. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Covariate handling](#covariate-handling)).
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files.
-* `--loco` : REGENIE step-1 leave-one-chromosome-out (LOCO) predictions, either a single `.loco` file (only when one trait is tested) or a REGENIE `*_pred.list` file with one `TRAIT PATH` line per trait. The prediction row for the chromosome of `--region` is subtracted from the phenotype (see [LOCO adjustment](#loco-adjustment)).
+* `--loco` : REGENIE step-1 leave-one-chromosome-out (LOCO) predictions of a single trait (a `.loco` file). The prediction row for the chromosome of `--region` is subtracted from the phenotype (see [LOCO adjustment](#loco-adjustment)). A `*_pred.list` file is also accepted here for backward compatibility.
+* `--pred` : REGENIE step-1 `*_pred.list` file for one or more traits, with one `[pheno_id] [path_to_loco]` line per trait. Every tested trait must be listed. It applies the same LOCO adjustment as `--loco`, and the two options cannot be combined.
 * `--pheno-format` : Format of the phenotype file (default: `regenie`). Options: `regenie`, `tensorqtl`, `tsv-sample-col`, `tsv-sample-row`.
 * `--cov-format` : Format of the covariate file (default: `regenie`). Options: `regenie`, `tsv-sample-col`, `tsv-sample-row`.
+* `--missing-str` : Comma-separated strings marking missing phenotype or covariate values (default: `NA`). All tested traits must share one set of samples, so missing phenotype values are allowed only when a single trait is tested. In that case, samples with a missing value are excluded before sample matching, so covariate adjustment, genotype residualization, RINT, LOCO, and the exported statistics all use the observed samples, and `N`/`n` report that count. With several tested traits, a missing value in any of them stops the run. Missing covariate values are not supported.
 * `--colname-pheno-sample` / `--colname-geno-sample` : When `--sample` is provided, the column names holding the phenotype-side and genotype-side sample IDs (defaults: `pheno` and `geno`).
 * `--icol-pivar-idx` : 1-based column index for the variant index in the indexed pvar file (default: 9).
 * `--icol-pheno-id` / `--icol-cov-id` : 1-based column index for the phenotype/covariate ID (default: 1).
@@ -125,6 +127,18 @@ Fine-mapping runs on exactly the same data as the marginal association reported 
 `.assoc.tsv.gz` file: the same genotype matrix, the same covariate-adjusted phenotypes, and the
 same set of samples. This is why the credible-set output can carry the marginal `BETA`, `SE`, and
 `LOG10P` alongside the posterior quantities.
+
+**Multiple traits.** Because all tested traits share the same samples, everything that does not
+depend on the trait is computed once per region and reused by every trait:
+
+* the centered (and standardized) genotype matrix;
+* `X'X`, which is also reused by `--out-suff`/`--out-rss` and for credible-set purity;
+* the eigendecomposition used by `inf`/`ash`;
+* `X'Y` for all traits, from a single matrix product that also feeds the marginal test.
+
+Each trait then only runs its own IBSS iterations. For example, at n = 12,000 and p = 3,000,
+each additional trait costs about 0.1 s with either `none` or `inf`, whereas `inf` alone takes
+about 3 s for the first trait.
 
 ### SuSiE options
 
@@ -205,7 +219,7 @@ both sides makes the reported effect the *partial* effect of the variant, and ma
 
 ## LOCO adjustment
 
-With `--loco`, the phenotype is adjusted for the polygenic background estimated by REGENIE
+With `--loco` (one trait) or `--pred` (a `*_pred.list` for one or more traits), the phenotype is adjusted for the polygenic background estimated by REGENIE
 step 1, following REGENIE step 2 for quantitative traits:
 
 1. RINT the raw phenotype if `--rint-before-adj` is set.
@@ -231,11 +245,12 @@ relative paths that do not exist as given are resolved against the list file's d
 ```bash
 qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
     --traits T1,T2 --region chr2:1000000-2000000 \
-    --loco [regenie_step1]_pred.list --susie --out [out_prefix]
+    --pred [regenie_step1]_pred.list --susie --out [out_prefix]
 ```
 
-!!! warning
-    `--loco` currently requires a phenotype matrix without missing values.
+With a single trait that has missing values, the samples with a missing phenotype are excluded
+first. LOCO scaling (step 3) then uses only the observed samples, matching a run in which those
+samples were removed from the phenotype file.
 
 ## Expected Output
 
@@ -428,8 +443,10 @@ Available Options:
    --pheno                [STR: ]             : Input phenotype matrix
    --sample               [STR: ]             : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
    --cov                  [STR: ]             : Input covariate matrix (optional)
-   --loco                 [STR: ]             : REGENIE step-1 LOCO predictions: a .loco file (single trait) or a *_pred.list file (TRAIT PATH per line). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units
+   --loco                 [STR: ]             : REGENIE step-1 LOCO predictions of a single trait (.loco file). The covariate-adjusted phenotype is scaled to unit SD, the prediction for the region's chromosome is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units. A *_pred.list file is also accepted here for backward compatibility
+   --pred                 [STR: ]             : REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco
    --pheno-format         [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
+   --missing-str          [STR: NA]           : Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). Missing phenotype values are allowed only when a single trait is tested; its samples with a missing value are excluded
    --cov-format           [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
    --traits               [STR: ]             : Trait IDs (comma-separated) to be tested (required)
    --traitf               [STR: ]             : Input file containing trait IDs to be tested (one per line)

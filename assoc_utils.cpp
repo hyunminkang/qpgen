@@ -5,6 +5,7 @@
 #include <cstring>
 #include <algorithm>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <sys/stat.h>
 
@@ -463,12 +464,25 @@ bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& X,
     std::vector<std::vector<slr_sumstat_t>>& results) {
     const int n = Y.rows();
-    const int num_x = X.cols();
-    const int num_y = Y.cols();
 
     if (n != X.rows()) {
         error("Matrix dimensions do not match : Y is (%d x %d) while X is (%d x %d)", Y.rows(), Y.cols(), X.rows(), X.cols());
     }
+
+    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
+    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
+    const Eigen::MatrixXd xt_y = X.transpose() * Y;
+    return simple_rect_regression_from_stats(n, x_sq_norms, y_sq_norms, xt_y, results);
+}
+
+bool simple_rect_regression_from_stats(
+    int n,
+    const Eigen::VectorXd& x_sq_norms,
+    const Eigen::RowVectorXd& y_sq_norms,
+    const Eigen::MatrixXd& xt_y,
+    std::vector<std::vector<slr_sumstat_t>>& results) {
+    const int num_x = (int)xt_y.rows();
+    const int num_y = (int)xt_y.cols();
 
     const int df = n - 2;
     if (df <= 0) {
@@ -481,10 +495,6 @@ bool simple_rect_regression_without_missing(
     if (num_x == 0 || num_y == 0) {
         return true;
     }
-
-    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
-    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
-    const Eigen::MatrixXd xt_y = X.transpose() * Y;
 
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double df_double = static_cast<double>(df);
@@ -563,12 +573,25 @@ bool simple_rect_score_test_without_missing(
     int32_t n_cov,
     std::vector<std::vector<slr_sumstat_t> >& results) {
     const int n = Y.rows();
-    const int num_x = X.cols();
-    const int num_y = Y.cols();
 
     if (n != X.rows()) {
         error("Matrix dimensions do not match : Y is (%d x %d) while X is (%d x %d)", Y.rows(), Y.cols(), X.rows(), X.cols());
     }
+    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
+    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
+    const Eigen::MatrixXd xt_y = X.transpose() * Y;
+    return simple_rect_score_test_from_stats(n, x_sq_norms, y_sq_norms, xt_y, n_cov, results);
+}
+
+bool simple_rect_score_test_from_stats(
+    int n,
+    const Eigen::VectorXd& x_sq_norms,
+    const Eigen::RowVectorXd& y_sq_norms,
+    const Eigen::MatrixXd& xt_y,
+    int32_t n_cov,
+    std::vector<std::vector<slr_sumstat_t> >& results) {
+    const int num_x = (int)xt_y.rows();
+    const int num_y = (int)xt_y.cols();
     const int df = n - n_cov;
     if (df <= 0) {
         error("Not enough data points for the score test (n - n_cov = %d must be > 0).", df);
@@ -580,9 +603,7 @@ bool simple_rect_score_test_without_missing(
         return true;
     }
 
-    const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
-    const Eigen::RowVectorXd sigma0_sq = Y.colwise().squaredNorm() / (double)df;
-    const Eigen::MatrixXd xt_y = X.transpose() * Y;
+    const Eigen::RowVectorXd sigma0_sq = y_sq_norms / (double)df;
     const double nan = std::numeric_limits<double>::quiet_NaN();
 
     for (int i = 0; i < num_x; ++i) {
@@ -1104,19 +1125,28 @@ bool is_loco_missing_str(const char* s) {
 // (only valid when exactly one trait is tested) or a REGENIE *_pred.list file
 // with lines "TRAIT PATH". Relative paths in the list that do not exist as given
 // are resolved against the directory of the list file.
-std::vector<std::string> resolve_loco_files(const std::string& locof, const std::vector<std::string>& pheno_ids) {
+// kind: ind_assoc_input::LOCO_ANY (detect), LOCO_SINGLE (.loco required) or
+// LOCO_PRED_LIST (*_pred.list required).
+std::vector<std::string> resolve_loco_files(const std::string& locof, const std::vector<std::string>& pheno_ids, int32_t kind) {
     std::vector<std::string> paths;
     tsv_reader tr(locof.c_str());
     if ( !tr.read_line() ) {
         error("LOCO file %s is empty", locof.c_str());
     }
     if ( strcmp(tr.str_field_at(0), "FID_IID") == 0 ) { // a single .loco file
+        if ( kind == ind_assoc_input::LOCO_PRED_LIST ) {
+            error("--pred %s is a single .loco file (header FID_IID), not a *_pred.list file. Use --loco for a single .loco file",
+                  locof.c_str());
+        }
         if ( pheno_ids.size() != 1 ) {
-            error("--loco %s is a single .loco file, but %zu traits are tested. Provide a REGENIE *_pred.list file (TRAIT PATH per line) instead",
+            error("--loco %s is a single .loco file, but %zu traits are tested. Provide a REGENIE *_pred.list file (TRAIT PATH per line) with --pred instead",
                   locof.c_str(), pheno_ids.size());
         }
         paths.push_back(locof);
         return paths;
+    }
+    if ( kind == ind_assoc_input::LOCO_SINGLE ) {
+        error("--loco %s is not a .loco file (its header does not start with FID_IID). Use --pred for a *_pred.list file", locof.c_str());
     }
 
     // *_pred.list file
@@ -1276,6 +1306,34 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     }
     notice("%zu overlapping samples found among sample, genotype, phenotype, and covariate files", (int32_t)overlapping_sample_ids.size());
 
+    // Single-trait missing values: analyze only the samples with an observed
+    // phenotype. Removing them here, before any subsetting, means the phenotype,
+    // covariate and genotype matrices (and the covariate residualization, RINT and
+    // LOCO scaling) are all built on the observed samples, so nothing downstream
+    // sees a missing value.
+    if ( drop_missing_pheno_samples && pheno_matrix.has_missing ) {
+        const int32_t n_traits = (int32_t)pheno_matrix.pheno_ids.size();
+        if ( n_traits > 1 ) {
+            error("The phenotype matrix has missing values across %d traits. Missing phenotype values are allowed only when a single trait is tested (all traits must share the same samples); run each trait separately", n_traits);
+        }
+        std::set<std::string> missing_ids;
+        for(int32_t i = 0; i < (int32_t)pheno_matrix.samp_ids.size(); ++i) {
+            if ( !pheno_matrix.pheno_mask(i, 0) ) missing_ids.insert(pheno_matrix.samp_ids[i]);
+        }
+        std::vector<std::string> kept_ids;
+        kept_ids.reserve(overlapping_sample_ids.size());
+        for(const std::string& id : overlapping_sample_ids) {
+            if ( missing_ids.find(id) == missing_ids.end() ) kept_ids.push_back(id);
+        }
+        notice("Trait %s: %zu of %zu overlapping samples have a missing phenotype and are excluded; analyzing %zu samples",
+               pheno_matrix.pheno_ids[0].c_str(), overlapping_sample_ids.size() - kept_ids.size(),
+               overlapping_sample_ids.size(), kept_ids.size());
+        if ( kept_ids.empty() ) {
+            error("No overlapping samples have an observed value for trait %s", pheno_matrix.pheno_ids[0].c_str());
+        }
+        overlapping_sample_ids.swap(kept_ids);
+    }
+
     // identify_overlapping_ids() returns IDs in lexicographic order, but the pgen
     // reader requires the sample subset in increasing genotype-file order. Put the
     // overlapping IDs in genotype order so that phenotype, covariate, and genotype
@@ -1291,7 +1349,7 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     // that have a (non-missing) LOCO prediction for every tested trait.
     std::vector<loco_row_t> loco_rows;
     if ( use_loco() ) {
-        std::vector<std::string> loco_paths = resolve_loco_files(loco_file, pheno_matrix.pheno_ids);
+        std::vector<std::string> loco_paths = resolve_loco_files(loco_file, pheno_matrix.pheno_ids, loco_kind);
         loco_rows.resize(loco_paths.size());
         for(size_t k = 0; k < loco_paths.size(); ++k) {
             notice("Loading LOCO predictions for trait %s on chromosome %s from %s",
