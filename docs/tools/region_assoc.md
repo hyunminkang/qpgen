@@ -152,6 +152,17 @@ causal variants, or polygenic background within the region) are modeled. It matc
 For `inf` and `ash`, `tau2` is reported in the log and a per-variant `theta` column is added to
 the LBF output.
 
+`inf` and `ash` start from a thin eigendecomposition of the standardized genotype matrix,
+taken on the smaller of `X'X` (p x p) or `XX'` (n x n), so the cost is
+`O(n p min(n,p) + min(n,p)^3)` like `susieR`'s `svd(X)`. When CMake finds a system LAPACK/BLAS
+(Accelerate on macOS; OpenBLAS/MKL on Linux, selectable with `-DBLA_VENDOR=...`), this step uses
+the multithreaded library. Otherwise it falls back to Eigen's single-threaded routines, which
+are several times slower for regions with thousands of variants. Set the thread count with the
+library's own variable, e.g. `VECLIB_MAXIMUM_THREADS`, `OPENBLAS_NUM_THREADS`, or `MKL_NUM_THREADS`.
+
+As in `susieR`, single effects whose estimated prior variance is ~0 (`V <= 1e-9`) are treated
+as inactive: they contribute neither to the reported PIPs nor to credible sets.
+
 Two options exist purely for **reduction tests**, i.e. verifying that `ash` collapses onto the
 simpler models, and are ignored unless `--unmappable-effects ash` is given:
 

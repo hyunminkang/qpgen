@@ -94,6 +94,8 @@ For lzma:
   - $ cmake -DLZMA_INCLUDE_DIRS=/lzma_absolute_path/include/ -DLZMA_LIBRARIES=/lzma_absolute_path/lib/liblzma.a ..
 </pre>
 
+A system LAPACK/BLAS is optional but recommended for `region-assoc --susie --unmappable-effects inf/ash`: it is detected automatically (Accelerate on macOS). Choose a specific library with `-DBLA_VENDOR=OpenBLAS` (or `Intel10_64lp`, etc.), or disable it with `-DQPGEN_USE_LAPACK=OFF`.
+
 Finally, to build the binary, run
 
 <pre>

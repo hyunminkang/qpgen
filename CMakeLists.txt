@@ -169,6 +169,25 @@ if(APPLE)
 endif()
 find_package(OpenMP REQUIRED)
 
+# Optional LAPACK/BLAS (Accelerate on macOS; OpenBLAS/MKL/reference on Linux,
+# selectable with -DBLA_VENDOR=...). Used by SuSiE-inf/ash for the genotype
+# cross-product and its eigendecomposition, which are multithreaded and several
+# times faster than Eigen's built-in single-threaded routines. Without it the
+# code falls back to Eigen. Thread count follows the library's own setting
+# (e.g. VECLIB_MAXIMUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS).
+option(QPGEN_USE_LAPACK "Use system LAPACK/BLAS for SuSiE linear algebra" ON)
+if(QPGEN_USE_LAPACK)
+    find_package(LAPACK)
+    if(LAPACK_FOUND)
+        message(STATUS "LAPACK found: ${LAPACK_LIBRARIES}")
+        target_compile_definitions(qpgen PRIVATE QPGEN_USE_LAPACK)
+        target_compile_definitions(${APP_EXE} PRIVATE QPGEN_USE_LAPACK)
+        target_link_libraries(${APP_EXE} PRIVATE ${LAPACK_LIBRARIES})
+    else()
+        message(WARNING "LAPACK not found: SuSiE-inf/ash will use single-threaded Eigen linear algebra (slower for large regions)")
+    endif()
+endif()
+
 #TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 #TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE Eigen3::Eigen ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")
 TARGET_LINK_LIBRARIES(${APP_EXE} PRIVATE Eigen3::Eigen ${QGEN_LIBRARIES} ${HTS_LIBRARIES} ${ZLIB} ${LZMA} ${BZIP2} ${CURLLIB} ${DEFLATELIB} ${CRYPTOLIB} "${OpenMP_CXX_FLAGS}")

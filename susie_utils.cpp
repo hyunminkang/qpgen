@@ -9,6 +9,28 @@
 
 namespace susie {
 
+// Effects whose estimated prior variance is at most this are inactive: their
+// alpha stays uniform (1/p) and carries no information. Same as susieR's
+// prior_tol default.
+static const double SUSIE_PRIOR_TOL = 1e-9;
+
+// Reported PIP = 1 - prod_l (1 - alpha_lj) over ACTIVE effects only, as in
+// susieR's susie_get_pip(prior_tol = 1e-9). Counting inactive effects would add
+// a spurious floor of 1 - (1 - 1/p)^{#inactive} to every variant (0.077 at p =
+// 100 with 8 inactive effects).
+static VectorXd reported_pip(const MatrixXd& alpha, const VectorXd& V) {
+    const int L = (int)alpha.rows();
+    const int p = (int)alpha.cols();
+    VectorXd pip(p);
+    for (int j = 0; j < p; ++j) {
+        double prod = 1.0;
+        for (int l = 0; l < L; ++l)
+            if (V(l) > SUSIE_PRIOR_TOL) prod *= (1.0 - alpha(l, j));
+        pip(j) = 1.0 - prod;
+    }
+    return pip;
+}
+
 // ---------------------------------------------------------------------------
 // Single-effect regression (SER) and prior-variance optimization
 // ---------------------------------------------------------------------------
@@ -194,12 +216,7 @@ SusieFit fit_susie(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt
         if (done) { fit.converged = true; break; }
     }
 
-    VectorXd pip(p);
-    for (int j = 0; j < p; ++j) {
-        double prod = 1.0;
-        for (int l = 0; l < L; ++l) prod *= (1.0 - alpha(l, j));
-        pip(j) = 1.0 - prod;
-    }
+    VectorXd pip = reported_pip(alpha, V);
 
     VectorXd Xb = X * b_bar;
     fit.alpha = alpha; fit.mu = mu; fit.mu2 = mu2;
@@ -258,39 +275,177 @@ static double susie_inf_optimize_V(const ArrayXd& pw, const ArrayXd& res,
     return v_best;
 }
 
+// Thin eigendecomposition of the (standardized) design, X = U D V', shared by
+// SuSiE-inf and SuSiE-ash. Equivalent to susieR's svd(X) path: only the
+// variant-space eigenvectors V, the eigenvalues d^2 and V'X'y are needed.
+//
+// The decomposition is taken on whichever cross-product is SMALLER:
+//   p <= n : X'X (p x p), whose eigenvectors are V directly;
+//   n <  p : XX' (n x n), with V = X'U D^{-1} formed by a single GEMM.
+// This keeps the cost at O(n p min(n,p) + min(n,p)^3), like a thin SVD. (Always
+// using the n x n Gram matrix made the cost O(n^3) and the memory O(n^2) even
+// for a handful of variants, e.g. ~8 min at n = 10K, p = 50.) Components with
+// ~0 singular value contribute ~0 everywhere and are dropped.
+struct ThinEigen {
+    VectorXd eigval;   // r    d_k^2
+    MatrixXd Vmat;     // p x r variant-space eigenvectors (susieR's svd$v)
+    VectorXd VtXty;    // r    V' X' y
+    VectorXd Xty;      // p    X' y
+};
+
+// ---- dense kernels for the one-time decomposition --------------------------
+// With QPGEN_USE_LAPACK (set by CMake when a system LAPACK/BLAS is found) these
+// call the (multithreaded) BLAS/LAPACK directly; otherwise Eigen's built-in,
+// single-threaded routines. At n = 10K, p = 4000 on Accelerate: cross-product
+// 0.27s vs 3.3s, eigendecomposition 5.7s vs 37s.
+#ifdef QPGEN_USE_LAPACK
+extern "C" {
+void dsyrk_(const char* uplo, const char* trans, const int* n, const int* k,
+            const double* alpha, const double* a, const int* lda,
+            const double* beta, double* c, const int* ldc);
+void dgemm_(const char* transa, const char* transb, const int* m, const int* n, const int* k,
+            const double* alpha, const double* a, const int* lda,
+            const double* b, const int* ldb, const double* beta, double* c, const int* ldc);
+void dsyevd_(const char* jobz, const char* uplo, const int* n, double* a, const int* lda,
+             double* w, double* work, const int* lwork, int* iwork, const int* liwork, int* info);
+void dsyevr_(const char* jobz, const char* range, const char* uplo, const int* n,
+             double* a, const int* lda, const double* vl, const double* vu,
+             const int* il, const int* iu, const double* abstol, int* m, double* w,
+             double* z, const int* ldz, int* isuppz, double* work, const int* lwork,
+             int* iwork, const int* liwork, int* info);
+}
+#endif
+
+// Lower triangle of C = X'X (trans) or XX' (!trans).
+static void sym_crossprod_lower(const MatrixXd& X, bool trans, MatrixXd& C) {
+    const int m = trans ? (int)X.cols() : (int)X.rows();
+    C.setZero(m, m);
+#ifdef QPGEN_USE_LAPACK
+    const int k = trans ? (int)X.rows() : (int)X.cols();
+    const int lda = (int)X.rows();
+    const double one = 1.0, zero = 0.0;
+    dsyrk_("L", trans ? "T" : "N", &m, &k, &one, X.data(), &lda, &zero, C.data(), &m);
+#else
+    if (trans) C.selfadjointView<Eigen::Lower>().rankUpdate(X.transpose());
+    else       C.selfadjointView<Eigen::Lower>().rankUpdate(X);
+#endif
+}
+
+// Symmetric eigendecomposition from the lower triangle of C. On return w holds
+// the eigenvalues in ascending order and C the corresponding eigenvectors.
+static void sym_eigen_inplace(MatrixXd& C, VectorXd& w) {
+    const int m = (int)C.rows();
+    w.resize(m);
+    if (m == 0) return;
+#ifdef QPGEN_USE_LAPACK
+    int info = 0;
+    if (m <= 16384) {
+        // divide-and-conquer: fastest, but needs ~2m^2 doubles of workspace
+        int lwork = -1, liwork = -1, iwq = 0;
+        double wq = 0.0;
+        dsyevd_("V", "L", &m, C.data(), &m, w.data(), &wq, &lwork, &iwq, &liwork, &info);
+        if (info == 0) {
+            lwork = (int)wq; liwork = iwq;
+            std::vector<double> work(lwork);
+            std::vector<int> iwork(liwork);
+            dsyevd_("V", "L", &m, C.data(), &m, w.data(), work.data(), &lwork,
+                    iwork.data(), &liwork, &info);
+        }
+    } else {
+        // MRRR: O(m) workspace (plus the m x m output), for very large m
+        MatrixXd Z(m, m);
+        std::vector<int> isuppz(2 * (size_t)m);
+        int nfound = 0, lwork = -1, liwork = -1, iwq = 0, il = 0, iu = 0;
+        double wq = 0.0, vl = 0.0, vu = 0.0, abstol = 0.0;
+        dsyevr_("V", "A", "L", &m, C.data(), &m, &vl, &vu, &il, &iu, &abstol, &nfound,
+                w.data(), Z.data(), &m, isuppz.data(), &wq, &lwork, &iwq, &liwork, &info);
+        if (info == 0) {
+            lwork = (int)wq; liwork = iwq;
+            std::vector<double> work(lwork);
+            std::vector<int> iwork(liwork);
+            dsyevr_("V", "A", "L", &m, C.data(), &m, &vl, &vu, &il, &iu, &abstol, &nfound,
+                    w.data(), Z.data(), &m, isuppz.data(), work.data(), &lwork,
+                    iwork.data(), &liwork, &info);
+        }
+        if (info == 0) C = std::move(Z);
+    }
+    if (info != 0)
+        error("SuSiE: LAPACK eigendecomposition of the %d x %d genotype cross-product failed (info=%d)", m, m, info);
+#else
+    Eigen::SelfAdjointEigenSolver<MatrixXd> es;
+    es.compute(C.selfadjointView<Eigen::Lower>());   // reads the lower triangle only
+    if (es.info() != Eigen::Success)
+        error("SuSiE: eigendecomposition of the %d x %d genotype cross-product failed", m, m);
+    w = es.eigenvalues();
+    C = es.eigenvectors();
+#endif
+}
+
+// out = A' B
+static void gemm_tn(const MatrixXd& A, const MatrixXd& B, MatrixXd& out) {
+#ifdef QPGEN_USE_LAPACK
+    const int m = (int)A.cols(), n = (int)B.cols(), k = (int)A.rows();
+    out.resize(m, n);
+    if (m == 0 || n == 0) return;
+    const int lda = (int)A.rows(), ldb = (int)B.rows();
+    const double one = 1.0, zero = 0.0;
+    dgemm_("T", "N", &m, &n, &k, &one, A.data(), &lda, B.data(), &ldb, &zero, out.data(), &m);
+#else
+    out.noalias() = A.transpose() * B;
+#endif
+}
+
+static ThinEigen thin_eigen_decomposition(const MatrixXd& X, const VectorXd& y) {
+    const int n = (int)X.rows();
+    const int p = (int)X.cols();
+    const bool variant_space = (p <= n);
+    const int m = variant_space ? p : n;
+
+    MatrixXd C;
+    sym_crossprod_lower(X, variant_space, C);        // m x m, lower triangle
+    VectorXd evals;                                  // ascending
+    sym_eigen_inplace(C, evals);                     // C <- eigenvectors
+
+    const double ev_tol = std::max(evals.maxCoeff(), 0.0) * 1e-8;
+    std::vector<int> keep;
+    for (int k = 0; k < m; ++k) if (evals(k) > ev_tol) keep.push_back(k);
+    const int r = (int)keep.size();
+
+    ThinEigen te;
+    te.eigval.resize(r);
+    MatrixXd E(m, r);                                // kept eigenvectors of C
+    for (int idx = 0; idx < r; ++idx) {
+        te.eigval(idx) = evals(keep[idx]);
+        E.col(idx) = C.col(keep[idx]);
+    }
+    C.resize(0, 0);
+    te.Xty = X.transpose() * y;
+    if (variant_space) {
+        te.Vmat = std::move(E);
+        te.VtXty = te.Vmat.transpose() * te.Xty;
+    } else {
+        // V = X'U D^{-1};  V'X'y = D U'y
+        const ArrayXd d = te.eigval.array().sqrt();
+        gemm_tn(X, E, te.Vmat);
+        te.Vmat.array().rowwise() /= d.transpose();
+        te.VtXty = d * (E.transpose() * y).array();
+    }
+    return te;
+}
+
 SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions& opt) {
     const int n = (int)X.rows();
     const int p = (int)X.cols();
     const int L = std::max(1, std::min(opt.L, p));
     const double var_y = y.squaredNorm() / std::max(1, n - 1); // y is pre-centered
 
-    // --- thin eigendecomposition of standardized X via the n x n Gram matrix ---
-    // (n < p in fine-mapping, so this is far cheaper than a full SVD). Components
-    // with ~0 singular value contribute ~0 everywhere and are dropped, which
-    // matches susieR's svd()-based path to numerical precision.
-    MatrixXd G = X * X.transpose();                 // n x n
-    Eigen::SelfAdjointEigenSolver<MatrixXd> es(G);
-    const VectorXd& evals = es.eigenvalues();       // ascending
-    const MatrixXd& U_all = es.eigenvectors();
-    const double ev_tol = std::max(evals.maxCoeff(), 0.0) * 1e-8;
-    std::vector<int> keep;
-    for (int k = 0; k < n; ++k) if (evals(k) > ev_tol) keep.push_back(k);
-    const int r = (int)keep.size();
-
-    VectorXd eigval(r);        // d_k^2
-    MatrixXd Vmat(p, r);       // variant-space eigenvectors (like susieR's svd$v)
-    VectorXd VtXty(r);         // d_k * (U_k' y) = V' X' y
-    for (int idx = 0; idx < r; ++idx) {
-        const int k = keep[idx];
-        const double ev = evals(k);
-        const double dk = std::sqrt(ev);
-        VectorXd uk = U_all.col(k);
-        eigval(idx)  = ev;
-        Vmat.col(idx) = (X.transpose() * uk) / dk;
-        VtXty(idx)   = dk * uk.dot(y);
-    }
+    // --- thin eigendecomposition of standardized X (see thin_eigen_decomposition) ---
+    ThinEigen te = thin_eigen_decomposition(X, y);
+    const VectorXd& eigval = te.eigval;             // d_k^2
+    const MatrixXd& Vmat   = te.Vmat;               // p x r
+    const VectorXd& VtXty  = te.VtXty;              // r
+    const VectorXd& Xty    = te.Xty;                // p
     MatrixXd Vsq = Vmat.array().square();           // p x r
-    VectorXd Xty = X.transpose() * y;               // p
     const double yty = y.squaredNorm();
     ArrayXd logpi = ArrayXd::Constant(p, -std::log((double)p));
 
@@ -313,15 +468,18 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
     VectorXd pip_prev = VectorXd::Zero(p);
     MatrixXd alpha_prev = alpha;
 
+    // VtB.col(l) = V' b_l with b_l = alpha_l * mu_l, kept in sync with (alpha, mu)
+    // so each SER needs only two p x r matrix-vector products and the MoM step
+    // reuses them instead of recomputing V' b_l for every effect.
+    MatrixXd VtB = MatrixXd::Zero(eigval.size(), L);                             // r x L
+
     SusieFit fit; fit.converged = false; fit.niter = 0;
 
     for (int iter = 0; iter < opt.max_iter; ++iter) {
+        VectorXd Vtb_sum = VtB.rowwise().sum();                                     // r = V' b_bar
         // ---- single-effect regressions (Omega-weighted) ----
         for (int l = 0; l < L; ++l) {
-            VectorXd b_full  = (alpha.array() * mu.array()).colwise().sum().transpose();
-            VectorXd b_l     = (alpha.row(l).array() * mu.row(l).array()).matrix().transpose();
-            VectorXd b_minus = b_full - b_l;
-            VectorXd Vtb     = Vmat.transpose() * b_minus;                          // r
+            VectorXd Vtb     = Vtb_sum - VtB.col(l);                                // r = V' b_{-l}
             VectorXd XtOmegaXb = Vmat * (Vtb.array() * eigval.array() / omega_var).matrix();
             ArrayXd res = (XtOmegay - XtOmegaXb).array();                           // p (= X'Omega r)
 
@@ -334,6 +492,8 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
                 mu2.row(l).setZero();
                 lbf_variable.row(l).setZero();
                 lbf(l) = 0.0;
+                VtB.col(l).setZero();
+                Vtb_sum = Vtb;
                 continue;
             }
             ArrayXd denom = 1.0 + Vl * pw.array();
@@ -350,6 +510,8 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
             mu2.row(l)   = (post_var + post_mean.square()).transpose();
             lbf_variable.row(l) = lbfj.transpose();
             lbf(l) = m + std::log(s);
+            VtB.col(l).noalias() = Vmat.transpose() * (a * post_mean).matrix();
+            Vtb_sum = Vtb + VtB.col(l);
         }
         fit.niter = iter + 1;
 
@@ -370,7 +532,7 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
 
         // ---- update variance components (method of moments) + theta BLUP ----
         VectorXd b   = (alpha.array() * mu.array()).colwise().sum().transpose();
-        VectorXd Vtb_all = Vmat.transpose() * b;                                    // r
+        const VectorXd& Vtb_all = Vtb_sum;                                          // r = V' b
         // theta uses the current (pre-update) Omega caches and tau2, as in susieR.
         VectorXd XtOmegaXb_all = Vmat * (Vtb_all.array() * eigval.array() / omega_var).matrix();
         theta = tau2 * (XtOmegay - XtOmegaXb_all);
@@ -379,9 +541,7 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
         ArrayXd diagVtMV = Vtb_all.array().square();
         ArrayXd tmpD = ArrayXd::Zero(p);
         for (int l = 0; l < L; ++l) {
-            VectorXd bl   = (alpha.row(l).array() * mu.row(l).array()).matrix().transpose();
-            VectorXd Vtbl = Vmat.transpose() * bl;
-            diagVtMV -= Vtbl.array().square();
+            diagVtMV -= VtB.col(l).array().square();
             ArrayXd omega_l = pw.array() + 1.0 / V(l);   // V(l)==0 -> +inf -> 1/omega_l == 0
             tmpD += alpha.row(l).transpose().array() *
                     (mu.row(l).transpose().array().square() + 1.0 / omega_l);
@@ -407,12 +567,7 @@ SusieFit fit_susie_inf(const MatrixXd& X, const VectorXd& y, const SusieOptions&
         XtOmegay  = Vmat * (VtXty.array() / omega_var).matrix();
     }
 
-    VectorXd pip(p);
-    for (int j = 0; j < p; ++j) {
-        double prod = 1.0;
-        for (int l = 0; l < L; ++l) prod *= (1.0 - alpha(l, j));
-        pip(j) = 1.0 - prod;
-    }
+    VectorXd pip = reported_pip(alpha, V);
 
     VectorXd b_final = (alpha.array() * mu.array()).colwise().sum().transpose();
     VectorXd Xr = X * (b_final + theta);
@@ -544,29 +699,12 @@ SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions&
     const double var_y = y.squaredNorm() / std::max(1, n - 1);
 
     // --- thin eigendecomposition of standardized X (same as fit_susie_inf) ---
-    MatrixXd G = X * X.transpose();
-    Eigen::SelfAdjointEigenSolver<MatrixXd> es(G);
-    const VectorXd& evals = es.eigenvalues();
-    const MatrixXd& U_all = es.eigenvectors();
-    const double ev_tol = std::max(evals.maxCoeff(), 0.0) * 1e-8;
-    std::vector<int> keep;
-    for (int k = 0; k < n; ++k) if (evals(k) > ev_tol) keep.push_back(k);
-    const int r_rank = (int)keep.size();
-
-    VectorXd eigval(r_rank);
-    MatrixXd Vmat(p, r_rank);
-    VectorXd VtXty(r_rank);
-    for (int idx = 0; idx < r_rank; ++idx) {
-        const int k = keep[idx];
-        const double ev = evals(k);
-        const double dk = std::sqrt(ev);
-        VectorXd uk = U_all.col(k);
-        eigval(idx)  = ev;
-        Vmat.col(idx) = (X.transpose() * uk) / dk;
-        VtXty(idx)   = dk * uk.dot(y);
-    }
+    ThinEigen te = thin_eigen_decomposition(X, y);
+    const VectorXd& eigval = te.eigval;
+    const MatrixXd& Vmat   = te.Vmat;
+    const VectorXd& VtXty  = te.VtXty;
+    const VectorXd& Xty    = te.Xty;
     MatrixXd Vsq = Vmat.array().square();
-    VectorXd Xty = X.transpose() * y;
     const double yty = y.squaredNorm();
     ArrayXd logpi_ser = ArrayXd::Constant(p, -std::log((double)p));
     ArrayXd xtx = X.array().square().colwise().sum();
@@ -747,12 +885,7 @@ SusieFit fit_susie_ash(const MatrixXd& X, const VectorXd& y, const SusieOptions&
         XtOmegay  = Vmat * (VtXty.array() / omega_var).matrix();
     }
 
-    VectorXd pip(p);
-    for (int j = 0; j < p; ++j) {
-        double prod = 1.0;
-        for (int l = 0; l < L; ++l) prod *= (1.0 - alpha(l, j));
-        pip(j) = 1.0 - prod;
-    }
+    VectorXd pip = reported_pip(alpha, V);
 
     VectorXd b_final = (alpha.array() * mu.array()).colwise().sum().transpose();
     VectorXd Xr = X * (b_final + theta);
@@ -809,6 +942,11 @@ std::vector<CredibleSet> susie_get_cs(const SusieFit& fit, const MatrixXd& X_std
     std::vector<std::vector<int32_t> > kept_sets; // for de-duplication
 
     for (int l = 0; l < L; ++l) {
+        // inactive effects (V ~ 0) have uniform alpha and never form a credible
+        // set, even in a small high-LD region where purity alone would pass
+        // (susieR's susie_get_cs skips V <= prior_tol the same way)
+        if (fit.V.size() == L && !(fit.V(l) > SUSIE_PRIOR_TOL)) continue;
+
         // order variables by descending alpha within this effect
         std::vector<int32_t> order(p);
         std::iota(order.begin(), order.end(), 0);
