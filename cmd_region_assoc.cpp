@@ -6,6 +6,7 @@
 #include "assoc_utils.h"
 #include "susie_utils.h"
 #include "susie_export.h"
+#include "blas_threads.h"
 #include "qpgen_utils.h"
 #include "qpgen.h"
 #include "pheno.h"
@@ -50,6 +51,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     bool rint_before_adj = false; // Perform rank-based inverse normal transformation before covariate adjustment
     bool rint_after_adj = false; // Perform rank-based inverse normal transformation after covariate adjustment
     bool score_test = false;     // REGENIE-style score test (null-model variance, normal p-value) instead of the Wald t-test
+    int32_t n_threads = 0;       // BLAS/LAPACK threads for SuSiE linear algebra (0 = library default)
 
     // SuSiE fine-mapping options
     bool run_susie = false;
@@ -75,6 +77,9 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::string suff_suffix = ".suff.bin.gz";
     std::string rss_suffix = ".rss.bin.gz";
 
+    // the help text names the BLAS/LAPACK backend actually loaded at run time
+    const std::string threads_desc = "Number of threads for the BLAS/LAPACK linear algebra of SuSiE-inf/ash (default: 0 = library default). Linked backend: " + blas_threads::backend();
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -96,6 +101,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_DOUBLE_PARAM("max-af", &max_af, "Maximum allele frequency for variants to be tested (default: 1.0)")
     LONG_DOUBLE_PARAM("min-ac", &min_ac, "Minimum allele count for variants to be tested (default: 0.0)")
     LONG_DOUBLE_PARAM("max-ac", &max_ac, "Maximum allele count for variants to be tested (default: 1e9)")
+    LONG_INT_PARAM("threads", &n_threads, threads_desc.c_str())
 
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
@@ -138,6 +144,13 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+
+    // must precede the first BLAS call (Accelerate reads its setting once)
+    if ( n_threads > 0 && !blas_threads::set_threads(n_threads) )
+        warning("--threads %d ignored: the linear-algebra backend (%s) does not support setting the thread count",
+                n_threads, blas_threads::backend().c_str());
+    if ( n_threads < 0 )
+        error("--threads must be >= 0 (got %d)", n_threads);
 
     // check required arguments
     if ( phef.empty() ) {
@@ -438,6 +451,9 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             }
 
             notice("Running SuSiE fine-mapping for %d phenotype(s) over %d variants", n_pheno, n_vars);
+            if ( run_inf || run_ash )
+                notice("SuSiE linear algebra: %s (threads: %s)",
+                       blas_threads::backend().c_str(), blas_threads::threads_str().c_str());
             for(int32_t k = 0; k < n_pheno; ++k) {
                 const std::string& trait = input.pheno_matrix.pheno_ids[k];
                 Eigen::VectorXd y = input.pheno_matrix.pheno_mat.col(k);

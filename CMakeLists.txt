@@ -96,6 +96,8 @@ set(SOURCE_FILES
     susie_utils.cpp
     susie_export.h
     susie_export.cpp
+    blas_threads.h
+    blas_threads.cpp
     include/pgenlib_misc.cc
     include/pgenlib_misc.h
     include/pgenlib_read.cc
@@ -173,16 +175,20 @@ find_package(OpenMP REQUIRED)
 # selectable with -DBLA_VENDOR=...). Used by SuSiE-inf/ash for the genotype
 # cross-product and its eigendecomposition, which are multithreaded and several
 # times faster than Eigen's built-in single-threaded routines. Without it the
-# code falls back to Eigen. Thread count follows the library's own setting
-# (e.g. VECLIB_MAXIMUM_THREADS, OPENBLAS_NUM_THREADS, MKL_NUM_THREADS).
+# code falls back to Eigen. The backend in use is detected at run time and
+# logged; region-assoc --threads sets its thread count (see blas_threads.h).
 option(QPGEN_USE_LAPACK "Use system LAPACK/BLAS for SuSiE linear algebra" ON)
 if(QPGEN_USE_LAPACK)
     find_package(LAPACK)
     if(LAPACK_FOUND)
         message(STATUS "LAPACK found: ${LAPACK_LIBRARIES}")
-        target_compile_definitions(qpgen PRIVATE QPGEN_USE_LAPACK)
-        target_compile_definitions(${APP_EXE} PRIVATE QPGEN_USE_LAPACK)
-        target_link_libraries(${APP_EXE} PRIVATE ${LAPACK_LIBRARIES})
+        # the linked library list is embedded so region-assoc can report it
+        string(REPLACE ";" " " QPGEN_LAPACK_LIBS_STR "${LAPACK_LIBRARIES}")
+        foreach(tgt qpgen ${APP_EXE})
+            target_compile_definitions(${tgt} PRIVATE QPGEN_USE_LAPACK
+                "QPGEN_LAPACK_LIBS=\"${QPGEN_LAPACK_LIBS_STR}\"")
+        endforeach()
+        target_link_libraries(${APP_EXE} PRIVATE ${LAPACK_LIBRARIES} ${CMAKE_DL_LIBS})
     else()
         message(WARNING "LAPACK not found: SuSiE-inf/ash will use single-threaded Eigen linear algebra (slower for large regions)")
     endif()

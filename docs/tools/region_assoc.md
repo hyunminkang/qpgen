@@ -157,8 +157,14 @@ taken on the smaller of `X'X` (p x p) or `XX'` (n x n), so the cost is
 `O(n p min(n,p) + min(n,p)^3)` like `susieR`'s `svd(X)`. When CMake finds a system LAPACK/BLAS
 (Accelerate on macOS; OpenBLAS/MKL on Linux, selectable with `-DBLA_VENDOR=...`), this step uses
 the multithreaded library. Otherwise it falls back to Eigen's single-threaded routines, which
-are several times slower for regions with thousands of variants. Set the thread count with the
-library's own variable, e.g. `VECLIB_MAXIMUM_THREADS`, `OPENBLAS_NUM_THREADS`, or `MKL_NUM_THREADS`.
+are several times slower for regions with thousands of variants.
+
+* `--threads N` : Number of BLAS/LAPACK threads (default `0` = the library's own default, usually
+  all cores). Supported for Accelerate, OpenBLAS, MKL, BLIS and FlexiBLAS. On a cluster, match it
+  to the cores you requested, e.g. `--threads $SLURM_CPUS_PER_TASK`.
+
+The backend actually loaded is detected at run time. It is shown in `region-assoc --help` (under
+`--threads`) and logged as `SuSiE linear algebra: <backend> (threads: N)` when `inf`/`ash` runs.
 
 As in `susieR`, single effects whose estimated prior variance is ~0 (`V <= 1e-9`) are treated
 as inactive: they contribute neither to the reported PIPs nor to credible sets.
@@ -432,6 +438,7 @@ Available Options:
    --max-af               [FLT: 1.00]         : Maximum allele frequency for variants to be tested (default: 1.0)
    --min-ac               [FLT: 0.00]         : Minimum allele count for variants to be tested (default: 0.0)
    --max-ac               [FLT: 1000000000.00] : Maximum allele count for variants to be tested (default: 1e9)
+   --threads              [INT: 0]            : Number of threads for the BLAS/LAPACK linear algebra of SuSiE-inf/ash (default: 0 = library default). Linked backend: Apple Accelerate
 
 == Output options ==
    --out                  [STR: ]             : Output prefix
