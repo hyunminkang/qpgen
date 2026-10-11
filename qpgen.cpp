@@ -727,10 +727,10 @@ bool MultiPgenIdxReader::prep_pgen_list(const char* listf, const char* pgen_suff
             std::string psamf = prefix + psam_suffix;
             add_pgen(chrom, beg, end, pgenf.c_str(), pvarf.c_str(), psamf.c_str());
         }
-        else if ( tr.nfields == 6 ) {
+        else if ( tr.nfields == 6 ) { // CHROM BEG END PGEN PSAM PIVAR, as documented in --help and docs/
             std::string pgenf = tr.str_field_at(3);
-            std::string pvarf = tr.str_field_at(4);
-            std::string psamf = tr.str_field_at(5);
+            std::string psamf = tr.str_field_at(4);
+            std::string pvarf = tr.str_field_at(5);
             add_pgen(chrom, beg, end, pgenf.c_str(), pvarf.c_str(), psamf.c_str());
         }
         else {
