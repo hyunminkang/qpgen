@@ -1066,7 +1066,7 @@ int32_t assoc_single_trait(
     // print the results
     for(int32_t i=0; i < (int32_t)v_cpra.size(); ++i) {
         const slr_sumstat_t& ss = sumstats[i];
-        hprintf(wf, "%s\t%s\t%d\t%s\t%s\t%s\t%.5g\t%d\t%d\t%d\t%d\t%.6g\t%.6g\t%.6g\t%.6g",
+        hprintf(wf, "%s\t%s\t%d\t%s\t%s\t%s\t%.5g\t%d\t%d\t%d\t%d\t%.6g\t%.6g\t%.6g\t%.6g\t%.6g",
             pheno_id, // TRAIT
             v_cpra[i].chrom.c_str(), // CHROM
             v_cpra[i].pos,           // POS

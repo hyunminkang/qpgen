@@ -227,6 +227,8 @@ protected:
     bool mean_impute_dosage; // true: replace missing dosages with the variant mean
     plink_var_t cur_var;  // current variant information
     int32_t cur_var_idx;  // current variant index
+    std::string last_pivar_chrom; // chromosome of the last pvar line consumed by read_pivar()/read_pos()
+    int32_t last_pivar_pos;       // position of that line, -1 before any line is read
     int32_t icol_pivar_idx; // column index for the variant ID in the pvar file (0-based)
 
     // sparse representation of the current variant's hardcalls.
@@ -237,7 +239,7 @@ protected:
     std::vector<int32_t> sparse_genos;       // their genotype codes (0/1/2/-9), parallel to sparse_sample_idxs
 
 public:
-    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), icol_pivar_idx(8), jump_thres_bp(10000), dosage_present(false), mean_impute_dosage(true), cur_is_sparse(false), sparse_common_geno(-9) {}
+    PgenIdxReader() : pivar_loaded(false), pgen_loaded(false), nthreads(1), dbl_buf(NULL), cur_var_idx(-1), last_pivar_pos(-1), icol_pivar_idx(8), jump_thres_bp(10000), dosage_present(false), mean_impute_dosage(true), cur_is_sparse(false), sparse_common_geno(-9) {}
     ~PgenIdxReader() {
         if ( dbl_buf ) free(dbl_buf);
     }

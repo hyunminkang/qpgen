@@ -551,6 +551,8 @@ bool PgenIdxReader::read_pos(const char* chrom, int32_t pos) {
         }
         const char* chrom2 = tr_pivar.str_field_at(0);
         int32_t pos2 = tr_pivar.int_field_at(1);
+        last_pivar_chrom.assign(chrom2);
+        last_pivar_pos = pos2;
         if ( strcmp(chrom2, chrom) != 0 ) { // something is wrong. No variant found 
             return false;           
         }
@@ -581,11 +583,14 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
 
     if ( cpra != NULL ) {
         cpra_t cpra_obj(cpra);
-        // check if we need to a jump of streaming
-        if ( cur_var_idx < 0 || 
-             cur_var.schrom.compare(cpra_obj.chrom) != 0 || 
-             cur_var.pos > cpra_obj.pos || 
-             cpra_obj.pos - cur_var.pos > jump_thres_bp ) {
+        // Decide between streaming forward and a tabix jump from the last pvar line actually
+        // consumed, not from cur_var (which only changes on a successful lookup): a failed
+        // lookup leaves the cursor past the requested position, and a repeated request or a
+        // request at the same position must re-read lines that were already consumed.
+        if ( last_pivar_pos < 0 ||
+             last_pivar_chrom.compare(cpra_obj.chrom) != 0 ||
+             cpra_obj.pos <= last_pivar_pos ||
+             cpra_obj.pos - last_pivar_pos > jump_thres_bp ) {
             tr_pivar.jump_to(cpra_obj.chrom.c_str(), cpra_obj.pos);
         }
         while( tr_pivar.read_line() ) { // find the variant
@@ -595,6 +600,8 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             }
             const char* chrom = tr_pivar.str_field_at(0);
             int32_t pos = tr_pivar.int_field_at(1);
+            last_pivar_chrom.assign(chrom);
+            last_pivar_pos = pos;
             const char* ref = tr_pivar.str_field_at(3);
             const char* alts = tr_pivar.str_field_at(4);
             if ( cpra_obj.chrom.compare(chrom) == 0 && 
@@ -626,6 +633,8 @@ bool PgenIdxReader::read_pivar(const char* cpra) {
             }
 
             int32_t pos = tr_pivar.int_field_at(1);
+            last_pivar_chrom.assign(chrom);
+            last_pivar_pos = pos;
             const char* ref = tr_pivar.str_field_at(3);
             const char* alts = tr_pivar.str_field_at(4);
 

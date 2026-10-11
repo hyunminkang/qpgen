@@ -331,7 +331,7 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                 cpra.ref.c_str(),
                 cpra.alts.c_str(),
                 a1freq,
-                vcnt.an,
+                vcnt.an / 2, // N: samples with a called genotype (an counts alleles)
                 vcnt.gcs[0],
                 vcnt.gcs[1],
                 vcnt.gcs[2]);

@@ -1,4 +1,5 @@
 #include "pheno.h"
+#include <strings.h>
 #include "qgenlib/qgen_error.h"
 #include "qgenlib/tsv_reader.h"
 #include "qpgen_utils.h"
@@ -345,9 +346,13 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
             if ( nlines == 0 ) {
                 nfields = tr.nfields;
                 if ( has_loci ) {
-                    if ( strcmp("#chr", tr.str_field_at(0)) != 0 ||
-                         strcmp("start", tr.str_field_at(1)) != 0 ||
-                         strcmp("end", tr.str_field_at(2)) != 0 ) {
+                    // header names are matched case-insensitively, with an optional leading '#'
+                    // (tensorQTL writes "#chr", other BED producers write "#Chr" or "#CHROM")
+                    const char* h_chr = tr.str_field_at(0);
+                    if ( h_chr[0] == '#' ) ++h_chr;
+                    if ( ( strcasecmp("chr", h_chr) != 0 && strcasecmp("chrom", h_chr) != 0 ) ||
+                         strcasecmp("start", tr.str_field_at(1)) != 0 ||
+                         strcasecmp("end", tr.str_field_at(2)) != 0 ) {
                         error("Expected chr,start,end columns for TensorQTL format in pheno file %s", pheno_file);
                     }
                 }
