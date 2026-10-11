@@ -20,6 +20,7 @@ qpgentools match-prs-pheno --prs [prs_matrix] --pheno [pheno_matrix] --out [out_
 
 ## Additional Options
 
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 * `--cov` : Input covariate matrix file (optional). If provided, phenotypes will be adjusted for covariates before matching.
 * `--sample-tsv` : TSV file containing sample ID mapping between PRS and phenotype files. Format: `[PRS_SAMPLE_ID] [PHENO_SAMPLE_ID]`. 
 * `--trait-tsv` : TSV file containing trait ID mapping between PRS and phenotype files. Format: `[PRS_TRAIT_ID] [PHENO_TRAIT_ID]`.
@@ -67,7 +68,7 @@ Missing covariate values are handled by dropping every sample with at least one 
 
 The PRS matrix is assumed to be complete. If it contains a value matching `--missing-str`, the program stops with an error.
 
-There is currently no minimum number of observed samples per trait or observed traits per sample; adding such thresholds is planned.
+Matching on fewer than 10 traits is unreliable, so the command warns when fewer than 10 phenotypes have a non-zero weight, and when some phenotyped samples have fewer than 10 observed traits with non-zero weight. The warning gives their number and a few examples. Such samples are still matched and reported; `N.Traits` gives their count, so they can be filtered afterwards. There is no threshold on the number of samples per trait.
 
 ## Expected Output
 
@@ -140,6 +141,7 @@ Available Options:
    --auto-lambda-metric   [STR: mean-log-softmax] : Criterion maximized by --auto-lambda (default: 'mean-log-softmax'). Options: 'mean-log-softmax', 'mean-z', 'mrr'
    --auto-lambda-min-self [INT: 100]          : Minimum number of phenotyped samples with a mapped PRS sample and observed traits required for tuning; fewer is an error (default: 100)
    --auto-lambda-min-best [INT: 100]          : Minimum number of mapped samples whose own PRS ranks first at the tuned lambda; fewer is an error, indicating a mismatched sample mapping (default: 100; 0 disables)
+   --space-delim          [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

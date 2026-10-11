@@ -58,6 +58,17 @@ The build produces two artifacts:
 * `bin/qpgentools` : the command line executable
 * `lib/libqpgen.a` : the static library
 
+To check which build you are running:
+
+```
+$ ./bin/qpgentools --version
+qpgentools 0.2.0 (git 938bf19)
+```
+
+The version is set in `CMakeLists.txt`, and the git commit is read at every build. A `-dirty`
+suffix means the build includes uncommitted changes to tracked files; `unknown` means the source
+is not a git checkout. Every command also writes this line at the start of its log.
+
 ## (Optional) Customized specification of the library path
 
 In case any required libraries is missing in `cmake`, you may specify customized installing path by replacing "cmake .." with the following options:

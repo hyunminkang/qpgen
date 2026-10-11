@@ -4,6 +4,7 @@
 #include "qgenlib/phred_helper.h"
 #include "qgenlib/hts_utils.h"
 #include "qpgen.h"
+#include "qpgen_utils.h"
 #include "Eigen/Dense"
 #include <cmath>
 
@@ -23,6 +24,8 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     std::string colname_pair_variant("variant"); // column name of the variant ID in the pair file
     std::string colname_pair_beta("beta");   // column name of the effect sizes
     std::string colname_pair_se("se");       // column name of the standard errors
+
+    bool space_delim = false; // space- instead of tab-delimited input tables
 
     paramList pl;
 
@@ -46,11 +49,13 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     LONG_STRING_PARAM("colname-pair-variant", &colname_pair_variant, "Column name of the variant ID in the pair file")
     LONG_STRING_PARAM("colname-pair-beta", &colname_pair_beta, "Column name of the effect sizes in the pair file")
     LONG_STRING_PARAM("colname-pair-se", &colname_pair_se, "Column name of the standard errors in the pair file")
+    LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+    const char table_delim = table_delimiter(space_delim);
 
     // open the Plink file
     MultiPgenIdxReader mpr;
@@ -86,6 +91,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
         std::vector<std::string> list_geno_sample_ids;          // list of sample IDs in the genotype file
         std::map<std::string, int32_t> list_geno_sample2idx;
         tsv_reader tr_sample(samplef.c_str());
+        tr_sample.delimiter = table_delim;
         while(tr_sample.read_line()) {
             if ( tr_sample.nfields > 1 ) {
                 error("The sample file %s should have at most one column, containing only IID", samplef.c_str());
@@ -106,6 +112,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
 
     // read the variant-trait pair lists
     tsv_reader tr_pair(pairf.c_str());
+    tr_pair.delimiter = table_delim;
     std::map<int32_t, std::map<cpra_t, std::pair<double, double> > > pair_map;
     std::map<int32_t, std::map<cpra_t, std::pair<double, double> > >::iterator pair_map_it;
     std::map<cpra_t, std::vector<int32_t> > var2traits;
@@ -193,9 +200,15 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
     mask_any_present.setZero();
     
     // iterate each variant 
-    int32_t n_pass = 0, n_skip = 0;
+    // every variant is counted once: scored (n_pass), not found or unreadable (n_skip), or
+    // monomorphic among the samples (n_mono)
+    int32_t n_pass = 0, n_skip = 0, n_mono = 0;
     std::map<cpra_t, std::vector<int32_t> >::iterator var2traits_it;
     for(var2traits_it = var2traits.begin(); var2traits_it != var2traits.end(); ++var2traits_it) {
+        const int32_t n_done = n_pass + n_skip + n_mono;
+        if ( n_done > 0 && n_done % 100 == 0 ) {
+            notice("Processed %d of %zu variants: %d scored, %d not found, %d monomorphic", n_done, var2traits.size(), n_pass, n_skip, n_mono);
+        }
         cpra_t cpra = var2traits_it->first;
         const std::vector<int32_t>& phe_idxs = var2traits_it->second;
         // extract the genotypes
@@ -234,6 +247,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
             } 
             if ( ac == 0 || an == ac ) {
                 // skip monomorphic variants
+                ++n_mono;
                 continue;
             }
 
@@ -265,6 +279,7 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
 
             if ( ac == 0 || an == ac ) {
                 // skip monomorphic variants
+                ++n_mono;
                 continue;
             }
 
@@ -309,10 +324,8 @@ int32_t cmd_pair_prs(int32_t argc, char **argv)
             count_mat.col(phe_idx) += mask_vec.cast<double>();
             mask_any_present(phe_idx) = true;
         }        
-        if ( (n_pass + n_skip) % 100 == 0 ) {
-            notice("Processed %d variants, skipped %d variants out of %zu variants", n_pass, n_skip, var2traits.size());
-        }
     }
+    notice("Processed all %zu variants: %d scored, %d not found, %d monomorphic", var2traits.size(), n_pass, n_skip, n_mono);
 
     std::string out_prs = outf + ".prs.tsv.gz";
     htsFile* wf = hts_open(out_prs.c_str(), "wz");

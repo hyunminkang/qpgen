@@ -50,7 +50,7 @@ public:
     // missing. Returns the number of imputed cells.
     int64_t impute_missing(bool as_half_min);
     
-    bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\0');
+    bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\t'); // delim: see table_delimiter()
     int32_t subset_sample_ids(const std::vector<std::string>& samp_ids);
     int32_t subset_pheno_ids(const std::vector<std::string>& pheno_ids);
     bool subset_sample_pheno_ids(const std::vector<std::string>& samp_ids, const std::vector<std::string>& pheno_ids);

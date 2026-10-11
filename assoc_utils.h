@@ -3,6 +3,8 @@
 
 #include "Eigen/Dense"
 #include <memory>
+#include <set>
+#include <unordered_map>
 #include "qgenlib/qgen_error.h"
 #include "qgenlib/hts_utils.h"
 #include "qpgen.h"
@@ -41,32 +43,90 @@ public:
 // Least-squares residualization against [1, C] (intercept + covariates, n x (p+1)) using a
 // column-pivoting Householder QR that is computed once and reused for any number of columns.
 //
-// rank() is the numerical rank of [1, C] reported by the QR (Eigen's default threshold). When
-// the QR keeps a pivot that rank() treats as zero (e.g. a covariate that is constant in the
-// analyzed samples), the projection uses only the first rank() Householder vectors, so that a
-// rounding-noise direction is not projected out; otherwise it is the plain least-squares fit.
+// The QR is computed on [1, C] with unit-norm columns, which spans the same space (so the
+// residuals are unchanged) but makes the rank independent of the covariates' scales. rank() is
+// the number of pivots above kRankTol times the largest one, as R's lm() does with tol = 1e-7.
+// The residuals are r = (I - Q_r Q_r') v with the first rank() Householder vectors, which stays
+// accurate when covariates are nearly collinear (a least-squares solve does not: its huge,
+// cancelling coefficients turn rounding errors into large residual errors).
 //
 // n_cov_df() = rank() - 1 is the number of residual degrees of freedom the covariates use
 // beyond the intercept. After residualizing both the phenotype and the genotype (Frisch-Waugh-
 // Lovell), the Wald test of y ~ 1 + C + g has df = n - 2 - n_cov_df().
 class CovariateResidualizer {
 public:
+    static constexpr double kRankTol = 1e-7;
+    // a genotype column whose residual sum of squares is below kCollinearTol of its centered
+    // sum of squares is (numerically) a linear combination of the covariates
+    static constexpr double kCollinearTol = 1e-8;
+
     explicit CovariateResidualizer(const Eigen::MatrixXd& covariates);
-    Eigen::Index n_samples() const { return C_aug.rows(); }
+    Eigen::Index n_samples() const { return n_samples_; }
     int32_t rank() const { return rank_; }
     int32_t n_cov_df() const { return rank_ - 1; }
+    // number of columns of [1, C] (the intercept plus the covariates)
+    int32_t n_cols() const { return n_cols_; }
     // values (n x k) <- residuals of values on [1, C]; blocks of a matrix are accepted
     void residualize(Eigen::Ref<Eigen::MatrixXd> values) const;
+    // Residualizes genotype columns and sets to zero those the covariates explain (see
+    // kCollinearTol), so that their statistics are reported as NaN instead of noise. Returns
+    // the number of zeroed columns. Columns are processed in blocks to bound peak memory.
+    int32_t residualize_genotypes(Eigen::Ref<Eigen::MatrixXd> G) const;
     // Residual sum of squares of each column of Y on [1, C]. Columns are processed one at a
     // time, so a column's value does not depend on the other columns passed with it (pair-assoc,
     // one trait at a time, and rect-/region-assoc, all traits at once, get identical values).
     Eigen::RowVectorXd residual_ss(const Eigen::MatrixXd& Y) const;
 
 private:
-    Eigen::MatrixXd C_aug;
+    Eigen::Index n_samples_;
+    int32_t n_cols_;
     Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr;
     int32_t rank_;
 };
+
+// ---- LOCO (REGENIE step-1 predictions) ---------------------------------------
+// A REGENIE .loco file has a header "FID_IID <FID>_<IID> ..." and one row per chromosome
+// ("1".."22", "23" for X) holding the leave-that-chromosome-out prediction for every sample.
+
+// LOCO predictions of one trait for one chromosome, indexed by sample ID.
+struct loco_row_t {
+    std::unordered_map<std::string, int32_t> exact;  // FID_IID -> column
+    std::unordered_map<std::string, int32_t> suffix; // IID candidate -> column (-1 if ambiguous)
+    std::vector<double> values;                      // NaN when missing
+    std::vector<bool> observed;
+
+    // Match a phenotype/genotype sample ID (usually IID only) to a .loco column:
+    // exact FID_IID match, then FID==IID, then a unique "<FID>_<id>" suffix match.
+    int32_t find(const std::string& id) const {
+        std::unordered_map<std::string, int32_t>::const_iterator it = exact.find(id);
+        if ( it != exact.end() ) return it->second;
+        it = exact.find(id + "_" + id);
+        if ( it != exact.end() ) return it->second;
+        it = suffix.find(id);
+        if ( it != suffix.end() ) return it->second; // may be -1 when ambiguous
+        return -1;
+    }
+    // true if the file has a column for sample `id` (works for a header-only row)
+    bool has(const std::string& id) const { return find(id) >= 0; }
+    // value for sample `id`; false if absent or missing
+    bool get(const std::string& id, double& val) const {
+        int32_t j = find(id);
+        if ( j < 0 || j >= (int32_t)observed.size() || !observed[j] ) return false;
+        val = values[j];
+        return true;
+    }
+};
+
+// Canonical chromosome label shared by region strings and .loco rows: strip a "chr" prefix and
+// map X/Y/XY/M(T) to REGENIE's numeric codes.
+std::string loco_chrom_label(const std::string& chrom);
+// The .loco file of each trait. locof is a single .loco file (only when one trait is tested) or a
+// REGENIE *_pred.list file ("TRAIT PATH" per line; relative paths are also tried against the
+// list's directory). kind: ind_assoc_input::LOCO_ANY, LOCO_SINGLE or LOCO_PRED_LIST.
+std::vector<std::string> resolve_loco_files(const std::string& locof, const std::vector<std::string>& pheno_ids, int32_t kind);
+// Reads the predictions of chromosome chrom from a .loco file into row (aborts if the file has no
+// such row). With an empty chrom, only the sample IDs of the header are read.
+void load_loco_row(const std::string& path, const std::string& chrom, loco_row_t& row);
 
 // class containing individual-level association analysis input data
 class ind_assoc_input {
@@ -82,6 +142,7 @@ public:
     PhenoMatrix pheno_matrix; // phenotype matrix
     PhenoMatrix cov_matrix;   // covariate matrix
     std::vector<std::string> overlapping_sample_ids; // overlapping sample IDs among genotype, phenotype, and covariate files
+    char table_delim;      // delimiter of the user-supplied tables (see table_delimiter())
     int32_t jump_thres_bp; // jump threshold in base pairs for the multi-pgen reader
     int32_t icol_pivar_idx; // column index for the variant ID in the pivar file
     std::vector<std::string> subset_sample_ids;
@@ -98,10 +159,19 @@ public:
     // LOCO adjustment using REGENIE step-1 predictions (optional)
     std::string loco_file;  // REGENIE .loco file (single trait) or *_pred.list file (TRAIT PATH per line)
     int32_t loco_kind;      // expected kind of loco_file: LOCO_ANY, LOCO_SINGLE or LOCO_PRED_LIST
-    std::string loco_chrom; // chromosome whose leave-one-chromosome-out predictions are subtracted
+    // chromosome whose leave-one-chromosome-out predictions are subtracted at load time; empty
+    // for per-chromosome mode, where apply_loco_chrom() is called before each chromosome's tests
+    std::string loco_chrom;
     // Per-trait SD of the covariate-residualized phenotype used to standardize it before
     // subtracting the LOCO predictions (REGENIE's scale_Y). Empty unless LOCO is applied.
     Eigen::RowVectorXd pheno_scale;
+    Eigen::MatrixXd pheno_loco_base;   // covariate-residualized phenotype divided by pheno_scale
+    std::vector<std::string> loco_paths; // .loco file of each trait (pheno_matrix.pheno_ids order)
+    std::vector<loco_row_t> loco_rows;   // predictions of each trait for loco_rows_chrom
+    std::string loco_rows_chrom;         // chromosome held in loco_rows ("" = sample IDs only)
+    std::string loco_applied_chrom;      // chromosome whose predictions pheno_matrix holds
+    std::set<std::string> loco_chroms_seen; // chromosomes applied so far (to report revisits)
+    bool subset_pheno_drop_absent;       // subset_pheno_ids: drop IDs absent from the phenotype file
 
     // Covariate degrees of freedom for the Wald tests: rank of [1, C] minus 1 (the intercept is
     // already part of df = N - 2). 0 without --cov. Set by load_pheno_cov_matrices().
@@ -118,8 +188,13 @@ public:
     // residualized (no --cov, or no transformation after the adjustment) and y'y is exact.
     bool pheno_cov_rss(const Eigen::MatrixXd& Y, Eigen::RowVectorXd& rss) const {
         rss.resize(0);
-        if ( !cov_resid || !pheno_transformed_after_cov ) return false;
-        rss = cov_resid->residual_ss(Y);
+        if ( !pheno_transformed_after_cov ) return false;
+        if ( cov_resid ) {
+            rss = cov_resid->residual_ss(Y);
+        }
+        else { // without --cov, the fit is on the intercept only
+            rss = ( Y.rowwise() - Y.colwise().mean() ).colwise().squaredNorm();
+        }
         return true;
     }
 
@@ -132,12 +207,14 @@ public:
     bool drop_missing_pheno_samples;
 
     ind_assoc_input() {
+        table_delim = '\t';
         jump_thres_bp = 1000000;
         icol_pivar_idx = 8;
         rint_before_adj = false;
         rint_after_adj = false;
         drop_missing_pheno_samples = false;
         loco_kind = LOCO_ANY;
+        subset_pheno_drop_absent = false;
         geno_chunk_done = false;
         n_cov_df = 0;
         pheno_transformed_after_cov = false;
@@ -159,7 +236,9 @@ public:
     // Enable LOCO adjustment. Must be called before the phenotype matrix is loaded.
     // locof: a REGENIE .loco file (header starting with FID_IID) when a single trait is tested,
     //        or a REGENIE *_pred.list file mapping each trait to its .loco file.
-    // chrom: chromosome of the tested region (e.g. "chr1", "1", "chrX"); X maps to 23.
+    // chrom: chromosome of the tested region (e.g. "chr1", "1", "chrX"); X maps to 23. Empty
+    //        (or NULL) for per-chromosome mode: the predictions are then subtracted by
+    //        apply_loco_chrom(), which must be called before testing each chromosome.
     // kind : LOCO_ANY detects the file type; LOCO_SINGLE / LOCO_PRED_LIST require it.
     enum { LOCO_ANY = 0, LOCO_SINGLE = 1, LOCO_PRED_LIST = 2 };
     void set_loco(const char* locof, const char* chrom, int32_t kind = LOCO_ANY) {
@@ -167,10 +246,14 @@ public:
             error("Cannot set LOCO file after the phenotype matrix is loaded");
         }
         loco_file = locof;
-        loco_chrom = chrom;
+        loco_chrom = ( chrom == NULL ) ? "" : chrom;
         loco_kind = kind;
     }
     bool use_loco() const { return !loco_file.empty(); }
+    // Sets pheno_matrix to the LOCO-adjusted phenotype for chromosome chrom (and RINT after it
+    // with --rint-after-adj), from the covariate-adjusted phenotype kept at load time. Reads the
+    // predictions of chrom when they are not already loaded. No-op when chrom is already applied.
+    void apply_loco_chrom(const std::string& chrom);
 
     void set_minmax_af(double _min_af, double _max_af) {
         min_af = _min_af;
@@ -182,11 +265,16 @@ public:
         max_ac = _max_ac;
     }
 
+    // delimiter of the phenotype/covariate matrices and the sample/trait lists (table_delimiter());
+    // set it before the set_subset_*_file() calls
+    inline void set_table_delimiter(char delim) { table_delim = delim; }
+
     inline void set_subset_sample_file(const char* samplef) {
         if ( is_pheno_loaded() ) {
             error("Cannot set subset sample file after the phenotype matrix is loaded");
         }
         tsv_reader tr_sample(samplef);
+        tr_sample.delimiter = table_delim;
         while(tr_sample.read_line()) {
             subset_sample_ids.push_back(tr_sample.str_field_at(0));
         }
@@ -204,16 +292,20 @@ public:
             error("Cannot set subset phenotype file after the phenotype matrix is loaded");
         }
         tsv_reader tr_pheno(phenof);
+        tr_pheno.delimiter = table_delim;
         while(tr_pheno.read_line()) {
             subset_pheno_ids.push_back(tr_pheno.str_field_at(icol_pheno_id - 1));
         }
     }
 
-    inline void set_subset_pheno_ids(const std::vector<std::string>& pheno_ids) {
+    // drop_absent: IDs absent from the phenotype file are dropped (with a notice) instead of
+    // being an error, and the kept traits are in sorted order
+    inline void set_subset_pheno_ids(const std::vector<std::string>& pheno_ids, bool drop_absent = false) {
         if ( is_pheno_loaded() ) {
             error("Cannot set subset phenotype file after the phenotype matrix is loaded");
         }
         subset_pheno_ids = pheno_ids;
+        subset_pheno_drop_absent = drop_absent;
     }
 
     bool process_pgenlist(const char* pgenlistf, const char* phef, const char* pheno_format, const char* covf, const char* cov_format);

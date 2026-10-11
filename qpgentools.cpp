@@ -1,6 +1,8 @@
 #include "qpgentools.h"
 #include "qgenlib/commands.h"
 #include "qgenlib/qgen_utils.h"
+#include "qgenlib/qgen_error.h"
+#include "qpgen_version.h" // generated at build time (cmake/qpgen_version.cmake)
 
 int32_t test_qpgen(int32_t argc, char** argv);
 int32_t match_plp_geno(int32_t argc, char** argv);
@@ -39,12 +41,19 @@ int32_t main(int32_t argc, char** argv) {
 
   cl.Add(new longCommands("Available Commands", longCommandlines));
   
+  if ( argc >= 2 && strcmp(argv[1], "--version") == 0 ) {
+    printf("qpgentools %s (git %s)\n", QPGEN_VERSION, QPGEN_GIT);
+    return 0;
+  }
+
   if ( argc < 2 ) {
-    printf("[qpgentools] -- Another command line toolkit for PLINK files\n\n");
+    printf("[qpgentools] -- Another command line toolkit for PLINK files\n");
+    printf("Version %s (git %s)\n\n", QPGEN_VERSION, QPGEN_GIT);
     fprintf(stderr, " Copyright (c) 2023-2025 by Hyun Min Kang\n");
     fprintf(stderr, " Licensed under the Apache License v2.0 and LGPLv3 (see LICENSE for details)\n");    
     fprintf(stderr, "To run a specific command      : %s [command] [options]\n",argv[0]);
-    fprintf(stderr, "For detailed instructions, run : %s --help\n",argv[0]);        
+    fprintf(stderr, "For detailed instructions, run : %s --help\n",argv[0]);
+    fprintf(stderr, "To print the version, run      : %s --version\n",argv[0]);
     cl.Status();
     return 1;
   }
@@ -53,6 +62,8 @@ int32_t main(int32_t argc, char** argv) {
       cl.HelpMessage();
     }
     else {
+      // the version goes first in every command's log, for provenance
+      notice("qpgentools %s (git %s)", QPGEN_VERSION, QPGEN_GIT);
       return cl.Read(argc, argv);
     }
   }

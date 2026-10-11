@@ -5,7 +5,7 @@
 ## Usage:
 ##   source("scripts/qpgen_susie_io.R")
 ##   ss  <- read_qpgen_suff("out.suff.bin.gz")   # X'X, X'y, y'y, n
-##   rss <- read_qpgen_rss("out.rss.bin.gz")     # z, R, n, bhat, shat, var_y
+##   rss <- read_qpgen_rss("out.rss.bin.gz")     # z, R, n, bhat, shat, var_y, test
 ##   fit <- susie_from_qpgen(ss,  trait = "ENSG00000164308.17", L = 10)  # susie_ss(XtX, Xty, yty, n)
 ##   fit <- susie_from_qpgen(rss, trait = "ENSG00000164308.17", L = 10)  # susie_rss(bhat, shat, R, n, var_y)
 ##   fit$sets$cs; susieR::susie_get_pip(fit)
@@ -19,15 +19,22 @@
   if (!identical(magic, expected_magic))
     stop(sprintf("unexpected magic '%s' (expected '%s')", magic, expected_magic))
   version <- readBin(con, "integer", 1, size = 4, endian = "little")
-  if (version != 1L) stop("unsupported format version ", version)
+  if (!(version %in% c(1L, 2L))) stop("unsupported format version ", version)
   dims <- readBin(con, "integer", 4, size = 4, endian = "little")
   n <- dims[1]; p <- dims[2]; K <- dims[3]; n_cov <- dims[4]
+  ## version 2 records the test of the .assoc statistics; version 1 files do not
+  test <- NA_character_
+  if (version >= 2L) {
+    code <- readBin(con, "integer", 1, size = 4, endian = "little")
+    test <- c("wald", "score")[code + 1L]
+    if (is.na(test)) stop("unknown test code ", code)
+  }
   region   <- readBin(con, "character", 1)
   traits   <- readBin(con, "character", K)
   variants <- readBin(con, "character", p)
   pos      <- readBin(con, "integer", p, size = 4, endian = "little")
   af       <- readBin(con, "double", p, size = 8, endian = "little")
-  list(version = version, n = n, p = p, K = K, n_cov = n_cov, region = region,
+  list(version = version, n = n, p = p, K = K, n_cov = n_cov, test = test, region = region,
        traits = traits, variants = variants, pos = pos, af = af)
 }
 
@@ -82,20 +89,37 @@ susie_from_qpgen_suff <- function(ss, trait = 1, ...) {
 ## variance by default; pass estimate_residual_variance = TRUE to reproduce
 ## the sufficient-statistics fit (matches susie_ss() to ~1e-9 on in-sample R).
 ##
-## shat in the file is the Wald SE with df = n - 2 - n_cov (n_cov = covariate
-## degrees of freedom, from the header), whereas susie_rss() assumes df = n - 2
-## when it rebuilds X'X, X'y and y'y. Unless rescale_shat = FALSE, shat is
-## therefore multiplied by sqrt((n - 2 - n_cov) / (n - 2)) first (no change
-## without covariates). This is exact for the default Wald statistics; it is
-## approximate (relative error ~ the share of the transformed phenotype's
-## variance explained by the covariates, typically < 1e-3) with
-## --rint-after-adj or LOCO, and not meaningful for files written with --score.
-susie_from_qpgen_rss <- function(rss, trait = 1, rescale_shat = TRUE, ...) {
+## susie_rss() rebuilds X'X, X'y and y'y from bhat, shat, var_y and n assuming
+## shat is the Wald SE with df = n - 2. Unless rescale_shat = FALSE, shat in the
+## file is first converted to that SE (n_cov = covariate degrees of freedom and
+## test from the header, z = bhat / shat):
+##   Wald (default):  shat * sqrt((n - 2 - n_cov) / (n - 2))
+##   score (--score): shat * sqrt((n - 1 - n_cov - z^2) / (n - 2))
+## Both are exact, except after --rint-after-adj or LOCO, where the Wald SE uses
+## the residual sum of squares of the transformed phenotype rather than its y'y
+## (relative error ~ the share of y'y the covariates explain, which region-assoc
+## prints; typically < 1e-3). Version-1 files do not record the test; pass
+## test = "score" for those written with --score (the default assumes Wald).
+susie_from_qpgen_rss <- function(rss, trait = 1, rescale_shat = TRUE, test = NULL, ...) {
   if (is.character(trait)) trait <- match(trait, rss$traits)
   if (is.na(trait)) stop("trait not found in file")
-  shat <- rss$shat[, trait]
-  if (rescale_shat) shat <- shat * sqrt((rss$n - 2 - rss$n_cov) / (rss$n - 2))
-  susieR::susie_rss(bhat = rss$bhat[, trait], shat = shat, R = rss$R,
+  if (is.null(test)) test <- rss$test
+  if (is.na(test)) {
+    if (rescale_shat) warning("format version 1 does not record the test; assuming Wald. ",
+                              "Pass test = \"score\" if the file was written with --score")
+    test <- "wald"
+  }
+  test <- match.arg(test, c("wald", "score"))
+  bhat <- rss$bhat[, trait]; shat <- rss$shat[, trait]
+  if (rescale_shat) {
+    if (test == "wald") {
+      shat <- shat * sqrt((rss$n - 2 - rss$n_cov) / (rss$n - 2))
+    } else {
+      z2 <- (bhat / shat)^2  # score z^2 = r^2 (n - 1 - n_cov) <= n - 1 - n_cov
+      shat <- shat * sqrt(pmax(rss$n - 1 - rss$n_cov - z2, 0) / (rss$n - 2))
+    }
+  }
+  susieR::susie_rss(bhat = bhat, shat = shat, R = rss$R,
                     n = rss$n, var_y = unname(rss$var_y[trait]), ...)
 }
 

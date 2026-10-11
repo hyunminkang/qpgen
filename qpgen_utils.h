@@ -10,6 +10,12 @@
 #include "qpgen.h"
 
 // identify overlapping IDS from list1 and list2, and store sorted overlapping IDs in overlapping_ids
+// Field delimiter of user-supplied tables (phenotype, covariate and PRS matrices, pair files,
+// sample, trait and variant lists): a tab by default, or a single space with --space-delim.
+// The two are never mixed, so with the default a field may contain spaces.
+#define QPGEN_SPACE_DELIM_HELP "Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)"
+inline char table_delimiter(bool space_delim) { return space_delim ? ' ' : '\t'; }
+
 int32_t identify_overlapping_ids(const std::vector<std::string>& list1, const std::vector<std::string>& list2, std::vector<std::string>& overlapping_ids);
 
 // index overlapping IDs from list1 and list2, and store sorted indices in index1 and index2

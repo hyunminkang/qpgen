@@ -22,6 +22,9 @@ qpgentools rect-assoc --pgen [pgen] --pivar [pivar] --psam [psam] --pheno [pheno
 
 ## Additional Options
 
+* `--loco` : REGENIE step-1 LOCO predictions of a single trait (`.loco` file). Only valid when one trait is tested. See [LOCO adjustment](#loco-adjustment).
+* `--pred` : REGENIE step-1 `*_pred.list` file for one or more traits, with one `[pheno_id] [path_to_loco]` line per trait. Every tested trait must be listed. Cannot be combined with `--loco`.
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 * `--pheno-list` : Input file containing the list of phenotypes to be tested (single column with phenotype IDs). If not provided, all phenotypes in the phenotype matrix will be tested. Phenotype IDs that are absent from the phenotype matrix are silently dropped.
 * `--cov` : Input covariate matrix in Regenie or TSV format. See [Covariate handling](#covariate-handling) below.
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files.
@@ -55,19 +58,62 @@ versions of this command did -- leaves genotype variance that is collinear with 
     and covariates, minus 1; the number of covariates when they are full rank). The statistics are
     therefore those of an ordinary least-squares fit with the covariates in the model; a redundant
     covariate (constant in the analyzed samples, or a linear combination of others) is adjusted
-    for once and costs no degree of freedom. With `--rint-after-adj`, the transformed phenotype
+    for once and costs no degree of freedom. The numerical rank is computed on the intercept and covariates scaled to unit norm, counting the pivots of a column-pivoted QR above `1e-7` times the largest one, as R's `lm()` does. A covariate that is *nearly* a linear combination of others is therefore treated as redundant too. A variant whose genotype is (numerically) a linear combination of the covariates (residual variance below `1e-8` of its total, e.g. when the variant itself is a covariate) cannot be tested: its statistics are reported as NaN. With `--rint-after-adj`, the transformed phenotype
     is no longer exactly orthogonal to the covariates, and its residual sum of squares on the
     intercept and covariates replaces `y'y` in the residual variance. Without `--cov`,
     `df = N - 2`.
+
+    Without `--cov`, the phenotypes are centered: the model is `y ~ 1 + genotype`. Earlier versions
+    did not center them, which inflated `SE` when a phenotype's mean was far from zero (14.5-fold for a simulated
+    phenotype with mean 20).
 
     Versions before this change used `df = N - 2` with `--cov` as well, which made `SE` too small
     by a factor of `sqrt((N - 2 - k) / (N - 2))` (about 5% for 66 covariates and 729 samples);
     `--cov` results therefore differ from those versions in `SE`, `TSTAT` and `LOG10P`, but not in
     `BETA`.
 
+### LOCO adjustment
+
+With `--loco` (one trait) or `--pred` (a `*_pred.list` for one or more traits), the phenotypes are
+adjusted for the polygenic background estimated by REGENIE step 1. The steps are the same as in
+[`region-assoc`](region_assoc.md#loco-adjustment): RINT before the adjustment (`--rint-before-adj`),
+covariate residualization, scaling to unit SD, subtraction of the LOCO prediction, and RINT
+(`--rint-after-adj`) or rescaling to the original SD.
+
+The prediction depends on the chromosome, so the phenotype matrix is LOCO-adjusted again for each
+chromosome of the variant list. A chunk of variants never spans two chromosomes, and the output
+keeps the order of the variant list. A list that returns to a chromosome after another one
+works, but that chromosome's predictions are read again, and a notice says so. Group the variants
+by chromosome to avoid this.
+
+Samples absent from any tested trait's `.loco` file are excluded, with a warning. A missing value
+(`NA`) in a chromosome's row stops the run with an error. `--pheno-list` is applied before the
+LOCO files are read, so `--pred` needs to list only the tested traits.
+
+A `.loco` file has a header `FID_IID <FID>_<IID> ...` and one row per chromosome (`1`-`22`, and `23` for X); the format, the chromosome naming and the sample-ID matching are the same as in [`region-assoc`](region_assoc.md#loco-adjustment). For the same chromosome, `pair-assoc`, `rect-assoc` and `region-assoc` give identical LOCO-adjusted statistics.
+
+### Missing genotypes
+
+`rect-assoc` tests every trait against every variant with one matrix product, so all tests share
+the same samples. A missing genotype is therefore **mean-imputed**: it is set to the mean of the
+called genotypes of that variant (2 × `A1FREQ`), and the sample stays in the test. For dosage
+files, the missing dosage is replaced by the variant's mean dosage when it is read. As a result:
+
+* `N` in the output counts the samples with a called genotype (`N_RR + N_RA + N_AA`), while the
+  regression and its degrees of freedom use all analyzed samples. For a variant with missing
+  genotypes, `df = (number of analyzed samples) - 2 - k` is larger than `N - 2 - k`.
+* An imputed genotype contributes nothing to `x'y` or `x'x`, so `BETA` is approximately unbiased
+  when genotypes are missing at random. The imputed samples still add residual variance and
+  degrees of freedom, so `SE` and `LOG10P` differ slightly from a complete-case analysis. The
+  difference is negligible at low missing rates.
+
+For complete-case results (each test uses only the samples with a called genotype, and `N` is
+the regression sample size), use [`pair-assoc`](pair_assoc.md) for the pairs of interest.
+
 !!! warning
-    Covariate adjustment and the rank-based inverse normal transformations are currently supported
-    only for phenotype and covariate matrices **without missing values**; the run aborts otherwise.
+    `rect-assoc` does not accept missing values in the phenotype or covariate matrices. A value
+    that is not a number, such as `NA`, stops the run with an error. Earlier versions read it as
+    `0`. Use [`pair-assoc`](pair_assoc.md) for traits with missing values.
 
 ## Expected Output
 
@@ -79,7 +125,7 @@ The output file named by `--out` (bgzipped when the name ends in `.gz`) contains
 * `ALLELE0` : Reference Allele
 * `ALLELE1` : Alternative Allele
 * `A1FREQ` : Frequency of Allele 1 (AC / AN)
-* `N` : Number of samples with a called genotype (`N_RR + N_RA + N_AA`)
+* `N` : Number of samples with a called genotype (`N_RR + N_RA + N_AA`). Samples with a missing genotype are mean-imputed and still enter the regression; see [Missing genotypes](#missing-genotypes)
 * `N_RR` : Count of Reference/Reference genotypes
 * `N_RA` : Count of Reference/Alternative genotypes
 * `N_AA` : Count of Alternative/Alternative genotypes
@@ -113,6 +159,8 @@ Available Options:
    --pivar           [STR: ]             : Input PLINK2 index pvar file (bgzipped and tabix)
    --pgen-list       [STR: ]             : Input file containing the list of region-specific BED files
    --pheno           [STR: ]             : Input phenotype matrix
+   --loco            [STR: ]             : REGENIE step-1 LOCO predictions of a single trait (.loco file). For each chromosome, the covariate-adjusted phenotype is scaled to unit SD, that chromosome's prediction is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units
+   --pred            [STR: ]             : REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco
    --sample          [STR: ]             : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
    --cov             [STR: ]             : Input covariate matrix (optional)
    --var-list        [STR: ]             : Input file containing the list of variants to be tested
@@ -135,6 +183,7 @@ Available Options:
    --icol-pivar-idx  [INT: 9]            : 1-based column index for the variant ID in the pvar file (default: 9)
    --icol-pheno-id   [INT: 1]            : 1-based column index for the phenotype ID in the phenotype file (default: 1)
    --icol-cov-id     [INT: 1]            : 1-based column index for the covariate ID in the phenotype file (default: 1)
+   --space-delim     [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

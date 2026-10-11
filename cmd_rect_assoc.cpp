@@ -21,6 +21,8 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     std::string varlistf;   // List of variants to be tested
     std::string phelistf;   // List of phenotypes to be tested
     std::string outf;
+    std::string locof;      // REGENIE step-1 LOCO predictions of a single trait (.loco file)
+    std::string predf;      // REGENIE step-1 *_pred.list: [pheno_id] [path_to_loco] per line
     std::string samplef;
     std::string pheno_format("regenie");
     std::string cov_format("regenie");
@@ -34,6 +36,8 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     bool rint_before_adj = false; // Perform rank-based inverse normal transformation before covariate adjustment
     bool rint_after_adj = false; // Perform rank-based inverse normal transformation after covariate adjustment
 
+    bool space_delim = false; // space- instead of tab-delimited input tables
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -43,6 +47,8 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("pivar", &pivarf, "Input PLINK2 index pvar file (bgzipped and tabix)")
     LONG_STRING_PARAM("pgen-list", &pgenlistf, "Input file containing the list of region-specific BED files")
     LONG_STRING_PARAM("pheno", &phef, "Input phenotype matrix")
+    LONG_STRING_PARAM("loco", &locof, "REGENIE step-1 LOCO predictions of a single trait (.loco file). For each chromosome, the covariate-adjusted phenotype is scaled to unit SD, that chromosome's prediction is subtracted, and (unless --rint-after-adj) the result is rescaled to the original SD so BETA/SE stay in phenotype units")
+    LONG_STRING_PARAM("pred", &predf, "REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco")
     LONG_STRING_PARAM("sample", &samplef, "Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files")
     LONG_STRING_PARAM("cov", &covf, "Input covariate matrix (optional)")
     LONG_STRING_PARAM("var-list", &varlistf, "Input file containing the list of variants to be tested")
@@ -65,11 +71,13 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     LONG_INT_PARAM("icol-pivar-idx", &icol_pivar_idx, "1-based column index for the variant ID in the pvar file (default: 9)")
     LONG_INT_PARAM("icol-pheno-id", &icol_pheno_id, "1-based column index for the phenotype ID in the phenotype file (default: 1)")
     LONG_INT_PARAM("icol-cov-id", &icol_cov_id, "1-based column index for the covariate ID in the phenotype file (default: 1)")
+    LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+    const char table_delim = table_delimiter(space_delim);
 
     // check required arguments
     if ( phef.empty() ) {
@@ -86,12 +94,39 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     // same plumbing cmd_region_assoc uses, and gives us the covariate-adjusted phenotype
     // matrix plus the overlapping sample IDs we need to load genotypes against.
     ind_assoc_input input;
+    input.set_table_delimiter(table_delim);
     input.set_jump_thres_bp(jump_thres_bp);
     input.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
     input.set_rint_before_adj(rint_before_adj);
     input.set_rint_after_adj(rint_after_adj);
     if ( !samplef.empty() ) {
         input.set_subset_sample_file(samplef.c_str());
+    }
+    if ( !locof.empty() && !predf.empty() ) {
+        error("--loco and --pred cannot be used together: --loco takes a single .loco file, --pred a *_pred.list file");
+    }
+    // LOCO predictions are subtracted per chromosome (apply_loco_chrom() below)
+    if ( !predf.empty() ) {
+        input.set_loco(predf.c_str(), NULL, ind_assoc_input::LOCO_PRED_LIST);
+    }
+    else if ( !locof.empty() ) {
+        input.set_loco(locof.c_str(), NULL);
+    }
+
+    // the trait list is applied while loading, so that LOCO predictions are read only for the
+    // tested traits. Phenotypes named in --pheno-list that are not in the pheno file are dropped.
+    if ( !phelistf.empty() ) {
+        tsv_reader tr_phelist(phelistf.c_str());
+        tr_phelist.delimiter = table_delim;
+        std::vector<std::string> phelist_ids;
+        while( tr_phelist.read_line() ) {
+            if ( tr_phelist.nfields != 1 ) {
+                error("Invalid format phenotype list file %s in line %zu starting with %s. Must contain only 1 field", phelistf.c_str(), (int32_t)phelist_ids.size() + 1, tr_phelist.str_field_at(0) );
+            }
+            phelist_ids.push_back( tr_phelist.str_field_at(0) );
+        }
+        notice("Loaded %d phenotype IDs from %s to subset the phenotype matrix", (int32_t)phelist_ids.size(), phelistf.c_str());
+        input.set_subset_pheno_ids(phelist_ids, true);
     }
 
     if ( !pgenlistf.empty() ) {
@@ -113,28 +148,9 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     // rint-after-adj to input.pheno_matrix, so from here we just consume input.pheno_matrix.pheno_mat.
     PhenoMatrix& pheno_matrix = input.pheno_matrix;
 
-    // load the trait list -- keep the permissive overlap semantics the original had:
-    // phenotypes named in --pheno-list that are not in the pheno file are silently dropped
-    if ( !phelistf.empty() ) {
-        tsv_reader tr_phelist(phelistf.c_str());
-        std::vector<std::string> phelist_ids;
-        while( tr_phelist.read_line() ) {
-            if ( tr_phelist.nfields != 1 ) {
-                error("Invalid format phenotype list file %s in line %zu starting with %s. Must contain only 1 field", phelistf.c_str(), (int32_t)phelist_ids.size() + 1, tr_phelist.str_field_at(0) );
-            }
-            phelist_ids.push_back( tr_phelist.str_field_at(0) );
-        }
-        std::vector<std::string> overlapping_phe_ids;
-        notice("Loaded %d phenotype IDs from %s to subset the phenotype matrix", (int32_t)phelist_ids.size(), phelistf.c_str());
-        identify_overlapping_ids(phelist_ids, pheno_matrix.pheno_ids, overlapping_phe_ids);
-        notice("%d overlapping phenotypes found between %d phenotypes in the phenotype matrix and %d phenotypes in %s", (int32_t)overlapping_phe_ids.size(), (int32_t)pheno_matrix.pheno_ids.size(), (int32_t)phelist_ids.size(), phelistf.c_str());
-        if ( pheno_matrix.subset_pheno_ids(overlapping_phe_ids) != (int32_t)overlapping_phe_ids.size() ) {
-            error("Failed to subset the phenotype matrix based on the provided phenotype list in %s", phelistf.c_str());
-        }
-    }
-
     // load the variant list
     tsv_reader tr_varlist(varlistf.c_str()); // varlist can be either [CHROM]:[POS]:[REF]:[ALT] format or tab-delimited
+    tr_varlist.delimiter = table_delim;
     std::vector<std::string> varlist_cpra;
     notice("Reading the variant list from %s", varlistf.c_str());
     while( tr_varlist.read_line() ) {
@@ -164,8 +180,11 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     // covariates beyond the intercept (0 without --cov). With --rint-after-adj the phenotype is
     // not orthogonal to the covariates, so its residual sum of squares on [1, C] replaces y'y.
     const int32_t n_cov_df = have_cov ? input.n_cov_df : 0;
+    // With LOCO, the phenotype (and its residual sums of squares) depends on the chromosome and
+    // is updated when the chromosome changes; chunks never span two chromosomes.
+    const bool use_loco = input.use_loco();
     Eigen::RowVectorXd y_rss;
-    const bool use_y_rss = have_cov && input.pheno_cov_rss(pheno_matrix.pheno_mat, y_rss);
+    bool use_y_rss = use_loco ? false : input.pheno_cov_rss(pheno_matrix.pheno_mat, y_rss);
 
     // open the output file gz or plain based on the extension
     htsFile* wf = hts_open(outf.c_str(), outf.substr(outf.length() - 3).compare(".gz") == 0 ? "wz" : "w");
@@ -183,14 +202,27 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     }
     hprintf(wf, "\n");
 
+    // chromosome of a variant-list entry (CHROM:POS:REF:ALT)
+    auto var_chrom = [](const std::string& cpra) { return cpra.substr(0, cpra.find(':')); };
+
     // process each chunk
-    for(int32_t i=0; i < varlist_cpra.size(); i += max_chunk_vars) {
+    int32_t i_chunk = 0;
+    for(int32_t i=0; i < (int32_t)varlist_cpra.size(); ) {
         bool geno_has_missing = false;
         int32_t chunk_size = (int32_t)varlist_cpra.size() - i > max_chunk_vars ? max_chunk_vars : (int32_t)varlist_cpra.size() - i;
+        if ( use_loco ) {
+            // end the chunk at the first change of chromosome, and use that chromosome's predictions
+            const std::string chrom = var_chrom(varlist_cpra[i]);
+            for(int32_t j = 1; j < chunk_size; ++j) {
+                if ( loco_chrom_label(var_chrom(varlist_cpra[i + j])) != loco_chrom_label(chrom) ) { chunk_size = j; break; }
+            }
+            input.apply_loco_chrom(chrom);
+            use_y_rss = input.pheno_cov_rss(pheno_matrix.pheno_mat, y_rss);
+        }
         Eigen::MatrixXd geno_mat(n_overlapping_samples, chunk_size);
         Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> geno_mask(n_overlapping_samples, chunk_size);
         int32_t n_skipped = 0;
-        notice("Loading genotype data for chunk %d with %d variants", i / max_chunk_vars + 1, chunk_size);
+        notice("Loading genotype data for chunk %d with %d variants", i_chunk + 1, chunk_size);
         std::vector<std::string> chunk_cpras;
         std::vector<var_cnt_t> chunk_var_cnts;
         for(int32_t j=0; j < chunk_size; ++j) {
@@ -313,7 +345,13 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                 error("Covariate matrix has %d rows but %d overlapping samples were expected",
                       (int32_t)input.cov_matrix.pheno_mat.rows(), n_overlapping_samples);
             }
-            input.cov_resid->residualize(geno_mat); // same fit as pheno_adj_cov_nxt_without_missing(), QR computed once
+            // same fit as the phenotypes, QR computed once; variants the covariates explain are
+            // zeroed so that they are reported as NaN
+            const int32_t n_collinear = input.cov_resid->residualize_genotypes(geno_mat);
+            if ( n_collinear > 0 ) {
+                notice("%d variants in this chunk are explained by the covariates (residual variance below %g of the total) and are reported as NaN",
+                       n_collinear, CovariateResidualizer::kCollinearTol);
+            }
         }
 
         // perform rectangular association analysis
@@ -325,7 +363,7 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                 rect_results,
                 n_cov_df,
                 use_y_rss ? &y_rss : NULL) ) {
-            error("Failed to perform rectangular association analysis for chunk %d", i / max_chunk_vars + 1);
+            error("Failed to perform rectangular association analysis for chunk %d", i_chunk + 1);
         }
 
         // write the results
@@ -355,6 +393,8 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
             }
             hprintf(wf, "\n");
         }
+        i += chunk_size;
+        ++i_chunk;
     }
     hts_close(wf); // close the output file
     notice("Analysis finished");

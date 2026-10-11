@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8...3.23)
-project(qpgen)
+project(qpgen VERSION 0.2.0)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -pthread -std=c++14")
@@ -123,6 +123,19 @@ ADD_LIBRARY(qpgen STATIC ${SOURCE_FILES})
 SET(APP_EXE qpgentools)
 
 ADD_EXECUTABLE(${APP_EXE} ${SOURCE_FILES} ${APP_FILES})
+
+# Version string (qpgentools --version, and the first log line of every command): the project
+# version above plus the git commit, regenerated at every build so it is never stale.
+set(QPGEN_VERSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(qpgen_version
+    COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -DOUT_FILE=${QPGEN_VERSION_DIR}/qpgen_version.h
+            -DQPGEN_VERSION=${PROJECT_VERSION}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/qpgen_version.cmake
+    BYPRODUCTS ${QPGEN_VERSION_DIR}/qpgen_version.h
+    COMMENT "Updating qpgen version information")
+add_dependencies(${APP_EXE} qpgen_version)
+target_include_directories(${APP_EXE} PRIVATE ${QPGEN_VERSION_DIR})
 
 find_library(ZLIB z HINTS /usr/lib/x86_64-linux-gnu/ /usr/lib/ /usr/lib64/)
 if(NOT ZLIB)

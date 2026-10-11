@@ -19,10 +19,15 @@ qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pa
 
 ## Additional Options
 
-* `--cov` : Input covariate matrix in Regenie, TensorQTL, or TSV format. See [Phenotype file formats](../formats/phenotypes.md) for more details. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Covariate handling](#covariate-handling)).
+* `--loco` : REGENIE step-1 LOCO predictions of a single trait (`.loco` file). Only valid when one trait is tested. See [LOCO adjustment](#loco-adjustment).
+* `--pred` : REGENIE step-1 `*_pred.list` file for one or more traits, with one `[pheno_id] [path_to_loco]` line per trait. Every tested trait must be listed. Cannot be combined with `--loco`.
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
+* `--cov` : Input covariate matrix in Regenie, TensorQTL, or TSV format. See [Phenotype file formats](../formats/phenotypes.md) for more details. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Model](#model)).
+* `--missing-str` : Comma-separated strings marking missing phenotype or covariate values (default: `NA`). See [Samples in each test](#samples-in-each-test).
+* `--mean-impute-geno` : Replace missing genotypes by the mean of the called genotypes instead of excluding the samples from that variant's test (default: false).
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
 * `--pheno-format` : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
-* `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
+* `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'. Use 'tsv-sample-col' when each row is a covariate and each column a sample
 * `--skip-rint` : Skip tests based on rank-based inverse normal transformation (default: false). With `--cov`, the RINT is applied to the covariate-adjusted phenotype, as `rect-assoc --rint-after-adj` does.
 * `--offset-pheno` : The number of index columns (i.e. not containing values) in the phenotype files (default: 1)
 * `--offset-cov` : The number of index columns (i.e. not containing values) in the covariate files (default: 1)
@@ -35,61 +40,114 @@ qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pa
 * `--colname-pair-variant` : Column name of the variant ID in the pair file (default: 'variant')
 * `--colname-pair-region` : Column name of the region string in the pair file (default: 'region')
 
-## Covariate handling
+## Model
 
-When `--cov` is supplied, the phenotypes are adjusted for the covariates by linear regression
-and the genotypes are residualized against the *same* covariates (Frisch-Waugh-Lovell), so
-that `BETA` is the partial effect of the variant. Adjusting only the phenotype -- as earlier
-versions of this command did -- leaves genotype variance that is collinear with the covariates
-(e.g. genotype PCs) in the design, which shrinks `BETA` and the test statistic.
+Each (trait, variant) pair is tested by the ordinary least-squares fit
+`y ~ 1 + covariates + genotype`. Without `--cov` the model is `y ~ 1 + genotype`, so the
+phenotype and the genotype are both centered.
 
-* The `_RINT` statistics use the rank-based inverse normal transform of the covariate-adjusted
-  phenotype, tested against the same residualized genotypes. They match
-  [`rect-assoc`](rect_assoc.md) with `--rint-after-adj`. Because the transformed phenotype is no
-  longer exactly orthogonal to the covariates, its residual sum of squares on the intercept and
-  covariates replaces `y'y` in the residual variance, so the `_RINT` statistics are those of the
-  OLS fit `RINT(adjusted y) ~ 1 + covariates + genotype`.
-* Missing hard-call genotypes are mean-imputed before residualization, as in `rect-assoc` and
-  [`region-assoc`](region_assoc.md), so every sample enters the regression. `N`, `A1FREQ`,
-  `N_RR`/`N_RA`/`N_AA`, and `INFO` are computed from the raw genotypes, so `N` is the number of
-  samples with a called genotype.
-* `SE`, `TSTAT` and `LOG10P` (and the `_RINT` columns) use the residual degrees of freedom of the
-  full model `y ~ 1 + covariates + genotype`: `df = n - 2 - k`, where `n` is the number of analyzed
-  samples and `k` is the number of linearly independent covariates (the numerical rank of the
-  intercept and covariates, minus 1; `k` equals the number of covariates when they are full
-  rank). `BETA`, `SE`, `TSTAT` and `LOG10P` therefore equal those of an ordinary least-squares
-  fit with the covariates in the model. Because missing genotypes are imputed, `n` can exceed the
-  `N` column for variants with missing genotypes. Without `--cov`, `df = n - 2` as before. The
-  value of `k` is printed in the log.
-* A variant whose genotype is (numerically) a linear combination of the covariates -- residual
-  variance below `1e-8` of its total variance, e.g. when the variant itself is a covariate -- cannot
-  be tested; its `BETA`, `SE`, `TSTAT`, and `LOG10P` (and `_RINT`) are reported as NaN, and the
-  number of such tests is reported at the end of the run.
-* A covariate that is constant in the analyzed samples (e.g. sex when `--sample` keeps one sex) or
-  a linear combination of other covariates is redundant. The adjustment uses the numerical rank of
-  the intercept and covariates, so a redundant covariate is adjusted for once and costs no degree
-  of freedom; the results equal those obtained without it. The command prints a warning when it
+The fit uses Frisch-Waugh-Lovell: the phenotype and the genotype are both residualized against
+the intercept and the covariates, and the slope of the residuals is tested. `BETA` is therefore
+the partial effect of the variant, and `BETA`, `SE`, `TSTAT` and `LOG10P` equal those of the full
+OLS fit. Adjusting only the phenotype, as early versions of this command did, leaves genotype
+variance that is collinear with the covariates (e.g. genotype PCs) in the design, which shrinks
+`BETA` and the test statistic.
+
+### Samples in each test
+
+* The samples are those shared by the genotype, phenotype, and covariate files (and `--sample`,
+  if given). They may appear in any order in each file; they are analyzed in genotype-file order.
+* Samples with a missing covariate value (any string listed in `--missing-str`, default `NA`) are
+  excluded from all tests.
+* Samples with a missing phenotype value are excluded from that trait's tests. The covariates
+  are fitted again on the remaining samples.
+* By default, samples with a missing genotype (hard call or dosage) are excluded from that
+  variant's test, and the covariates are fitted again on the remaining samples (complete-case
+  analysis). `N` is then the number of samples in the regression, and
+  `N = N_RR + N_RA + N_AA`.
+* With `--mean-impute-geno`, a missing genotype is replaced by the mean of the called genotypes
+  and every sample with an observed phenotype is kept, as in [`rect-assoc`](rect_assoc.md).
+  `N` is still the number of samples in the regression. It can then exceed
+  `N_RR + N_RA + N_AA`.
+* `A1FREQ`, `N_RR`/`N_RA`/`N_AA` and `INFO` are computed from the called genotypes of the
+  trait's samples.
+* A value that is neither a number nor a missing string (e.g. sex coded as `XX`/`XY`) stops the
+  run with an error. Code categorical covariates as numbers.
+
+### Degrees of freedom
+
+`SE`, `TSTAT` and `LOG10P` (and the `_RINT` columns) use the residual degrees of freedom of the
+full model: `df = N - 2 - k`, where `N` is the number of samples in the regression and `k` is the
+number of linearly independent covariates. `k` is the numerical rank of the intercept and
+covariates, minus 1. It equals the number of covariates when they are full rank, and it is 0
+without `--cov`. The value of `k` is printed in the log.
+
+### RINT statistics
+
+The `_RINT` statistics use the rank-based inverse normal transform of the covariate-adjusted
+phenotype of the trait's samples, tested against the same residualized genotypes. They match
+[`rect-assoc`](rect_assoc.md) with `--rint-after-adj`. The transformed phenotype is no longer
+exactly orthogonal to the covariates, so its residual sum of squares on the intercept and
+covariates replaces `y'y` in the residual variance. The `_RINT` statistics are therefore those of
+the OLS fit `RINT(adjusted y) ~ 1 + covariates + genotype`. For a variant with missing genotypes,
+the transformed phenotype is not recomputed; the samples with a missing genotype are dropped
+from it.
+
+### LOCO adjustment
+
+With `--loco` (one trait) or `--pred` (a `*_pred.list` for one or more traits), each trait is
+adjusted for the polygenic background estimated by REGENIE step 1, following REGENIE step 2 for
+quantitative traits. The steps are run for each trait on its samples, then again for each
+chromosome of its pairs:
+
+1. Residualize the phenotype against the intercept and the covariates.
+2. Scale the residual to unit SD, with `SD = ||r|| / sqrt(N - 1 - k)` (REGENIE's `scale_Y`).
+3. Subtract the LOCO prediction for the chromosome of the tested variant.
+4. For `BETA`, `SE`, `TSTAT` and `LOG10P`, multiply the result back by the SD from step 2, so
+   effects stay in units of the covariate-adjusted phenotype. The `_RINT` statistics use the RINT
+   of the result of step 3, as REGENIE's `--apply-rerint` does.
+
+The raw statistics therefore equal [`region-assoc`](region_assoc.md) with `--loco`/`--pred`, and
+the `_RINT` statistics equal `region-assoc --rint-after-adj` with `--loco`/`--pred`. Both are
+OLS fits of the LOCO-adjusted phenotype on the intercept, covariates and genotype.
+
+Samples absent from a trait's `.loco` file are excluded from that trait's tests, with a warning.
+A missing value (`NA`) in a chromosome's row stops the run with an error. Pairs are tested in
+chromosome order, so each chromosome's predictions are read once per trait.
+
+A `.loco` file has a header `FID_IID <FID>_<IID> ...` and one row per chromosome (`1`-`22`, and `23` for X); the format, the chromosome naming and the sample-ID matching are the same as in [`region-assoc`](region_assoc.md#loco-adjustment). For the same chromosome, `pair-assoc`, `rect-assoc` and `region-assoc` give identical LOCO-adjusted statistics.
+
+```bash
+qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pairs] \
+    --pred [regenie_step1]_pred.list --out [out]
+```
+
+### Redundant covariates and untestable variants
+
+* A variant whose genotype is (numerically) a linear combination of the covariates cannot be
+  tested. This is detected when its residual variance is below `1e-8` of its total variance, e.g.
+  when the variant itself is a covariate. Its `BETA`, `SE`, `TSTAT`, and `LOG10P` (and `_RINT`) are
+  reported as NaN, and the number of such tests is reported at the end of the run.
+* A covariate that is constant in the analyzed samples (e.g. sex when `--sample` keeps one sex) is
+  redundant, and so is one that is a linear combination of other covariates. The adjustment uses
+  the numerical rank of the intercept and covariates, so a redundant covariate is adjusted for
+  once and costs no degree of freedom. The numerical rank is computed on the intercept and covariates scaled to unit norm, counting the pivots of a column-pivoted QR above `1e-7` times the largest one, as R's `lm()` does. A covariate that is *nearly* a linear combination of others is therefore treated as redundant too. The command prints a warning when it
   detects redundant covariates; dropping them is still recommended.
 
-!!! note
-    Effect sizes and p-values from `--cov` runs will therefore differ from those produced by
-    versions of `qpgentools` released before this fix. For the same covariates, `pair-assoc`,
-    [`rect-assoc`](rect_assoc.md), and [`region-assoc`](region_assoc.md) now agree on shared
-    (trait, variant) pairs. Without `--cov`, the output is unchanged.
-
-    Earlier versions also used `df = n - 2` with `--cov`, ignoring the covariates. Their `SE` was
-    too small by a factor of `sqrt((n - 2 - k) / (n - 2))` and their `LOG10P` too large (about 5% in
-    `TSTAT` for 66 covariates and 729 samples). `BETA` is unchanged by the degrees-of-freedom
-    correction.
-
-!!! warning
-    `pair-assoc` does not recognize missing-value tokens in the phenotype or covariate files:
-    a non-numeric cell such as `NA` is read as `0`, with no error. Provide phenotype and
-    covariate matrices **without missing values**.
+!!! note "Changes from earlier versions"
+    * Without `--cov`, earlier versions neither centered the phenotype nor centered dosages. When
+      the phenotype mean was far from zero, `SE` was inflated: about 100-fold for a phenotype
+      with mean 50. With dosages, `BETA` was also wrong.
+    * Earlier versions read `NA` as `0`. They mean-imputed missing genotypes with `--cov` and
+      dropped them without it. They also failed when the genotype-file sample order was not
+      lexicographic.
+    * Earlier versions used `df = n - 2` with `--cov`, ignoring the covariates. Their `SE` was too
+      small by a factor of `sqrt((n - 2 - k) / (n - 2))`.
+    * The first header field is `TRAIT`; earlier versions wrote `#TRAIT`.
 
 ## Expected Output
 
-The output TSV file contains the following columns, largely resembling the Regenie output format:
+The output TSV file has a header line followed by one line per tested pair. Its columns largely follow the Regenie output format:
 
 * `TRAIT` : Trait name
 * `CHROM` : Chromosome of the variant tested
@@ -97,8 +155,8 @@ The output TSV file contains the following columns, largely resembling the Regen
 * `ID` : Variant ID in `[CHROM]:[GENPOS]:[REF]:[ALT]` format
 * `ALLELE0` : Reference allele
 * `ALLELE1` : Alternative allele
-* `A1FREQ`: Allele frequency of alternate allele
-* `N`: Sample size. With `--cov`, the number of samples with a called genotype (see [Covariate handling](#covariate-handling)); without it, the number of samples with both a phenotype value and a called genotype
+* `A1FREQ`: Allele frequency of the alternate allele among the called genotypes
+* `N`: Number of samples in the regression (see [Samples in each test](#samples-in-each-test))
 * `N_RR`: Number of RR genotypes
 * `N_RA`: Number of RA genotypes
 * `N_AA`: Number of AA genotypes
@@ -139,6 +197,9 @@ Available Options:
    --cov                  [STR: ]             : Input covariate matrix (optional)
    --pheno-format         [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
    --cov-format           [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
+   --loco                 [STR: ]             : REGENIE step-1 LOCO predictions of a single trait (.loco file). For each chromosome, the covariate-adjusted phenotype is scaled to unit SD, that chromosome's prediction is subtracted, and the result is rescaled to the original SD for BETA/SE (the _RINT statistics use the RINT of the unscaled result, as REGENIE --apply-rerint)
+   --pred                 [STR: ]             : REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco
+   --missing-str          [STR: NA]           : Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). Samples with a missing phenotype are excluded from that trait's tests; samples with a missing covariate are excluded from all tests
 
 == Output options ==
    --out                  [STR: ]             : Output prefix
@@ -157,6 +218,8 @@ Available Options:
    --colname-pair-variant [STR: variant]      : Column name of the variant ID in the pair file
    --colname-pair-region  [STR: region]       : Column name of the region string in the pair file
    --skip-rint            [FLG: OFF]          : Skip tests based on rank-based inverse normal transformation (default: false)
+   --mean-impute-geno     [FLG: OFF]          : Replace missing genotypes by the mean of the called genotypes and keep every sample with an observed phenotype (as rect-assoc does). By default, samples with a missing genotype are excluded from that variant's test
+   --space-delim          [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

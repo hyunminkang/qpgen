@@ -20,6 +20,7 @@ qpgentools pair-prs --pgen-list [list] --pairs [pairs] --out [out_prefix]
 
 ## Additional Options
 
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
 * `--colname-pair-trait` : Column name of the trait ID in the pair file (default: 'trait')
 * `--colname-pair-variant` : Column name of the variant ID in the pair file (default: 'variant')
@@ -70,6 +71,7 @@ Available Options:
    --colname-pair-variant [STR: variant]      : Column name of the variant ID in the pair file
    --colname-pair-beta    [STR: beta]         : Column name of the effect sizes in the pair file
    --colname-pair-se      [STR: se]           : Column name of the standard errors in the pair file
+   --space-delim          [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

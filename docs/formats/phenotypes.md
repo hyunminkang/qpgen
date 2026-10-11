@@ -14,6 +14,27 @@
 In `qpgentools`, many commands that accepted this modified PLINK2 format, including 
 `qpgentools pair-assoc`, `qpgentools pair-prs`, and `qpgentools rect-assoc`, can accept the phenotype or covariate files in the above formats. The formats can be specified using the `--pheno-format` or `--cov-format` options.
 
+## Delimiters
+
+Phenotype, covariate and PRS matrices, and the other input tables (pair files, `--sample`,
+trait and variant lists), are **tab-delimited**. A field may then contain spaces, e.g. a trait
+name such as `IL6 (pg/ml)`. Each command takes `--space-delim` for files delimited by single
+spaces instead; the two are never mixed. A header that splits into too few fields stops the run
+with an error that names the delimiter in effect.
+
+Genotype files (`.psam`, `.fam`, `.pvar`) and REGENIE files (`.loco`, `*_pred.list`) follow their
+own formats and are not affected.
+
+## Values and missing values
+
+Every value must be a number. A value that is not a number (for example sex coded as `XX`/`XY`,
+or `NA` in a command that does not take `--missing-str`) stops the run with an error, instead of
+being read as `0` as in earlier versions. Code categorical covariates as numbers.
+
+`pair-assoc`, `region-assoc` and `match-prs-pheno` take `--missing-str` (default `NA`): a
+comma-separated list of strings that mark missing values. See each command's page for how
+missing values are handled. `rect-assoc` does not accept missing values.
+
 ## Regenie format
 
 The Regenie phenotype format (with `--pheno-format regenie`) is a TSV file following convention:
@@ -27,11 +48,13 @@ Each row represents a sample, and each column represents a phenotype.
 Here is an example:
 
 ```
-FID IID pheno1 pheno2 pheno3
-1 1 1.2 3.4 5.6
-2 2 2.3 4.5 6.7
+FID	IID	pheno1	pheno2	pheno3
+1	1	1.2	3.4	5.6
+2	2	2.3	4.5	6.7
 ...
 ```
+
+(Columns are separated by tabs; use `--space-delim` for space-delimited files.)
 
 Please refer to the [Regenie documentation](https://rgcgithub.github.io/regenie/options/#phenotype-file-format) for more details.
 
@@ -50,9 +73,9 @@ Each row represents a molecular trait, and each column represents a sample.
 Here is an example:
 
 ```
-#chr    start   end     phenotype_id    sample1 sample2 sample3
-1   100000  100001  gene1   1.2   3.4   5.6
-2   200000  200001  gene2   2.3   4.5   6.7
+#chr	start	end	phenotype_id	sample1	sample2	sample3
+1	100000	100001	gene1	1.2	3.4	5.6
+2	200000	200001	gene2	2.3	4.5	6.7
 ...
 ```
 
@@ -63,9 +86,9 @@ The sample-row TSV format (with `--pheno-format tsv-sample-row`) is a TSV file t
 Here is an example:
 
 ```
-SampleID pheno1 pheno2 pheno3
-sample1 1.2 3.4 5.6
-sample2 2.3 4.5 6.7
+SampleID	pheno1	pheno2	pheno3
+sample1	1.2	3.4	5.6
+sample2	2.3	4.5	6.7
 ...
 ```
 
@@ -76,9 +99,9 @@ The sample-column TSV format (with `--pheno-format tsv-sample-column`) is a TSV 
 Here is an example:
 
 ```
-TraitID sample1 sample2 sample3
-trait1  1.2   3.4   5.6
-trait2  2.3   4.5   6.7
+TraitID	sample1	sample2	sample3
+trait1	1.2	3.4	5.6
+trait2	2.3	4.5	6.7
 ...
 ```
 

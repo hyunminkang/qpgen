@@ -3,6 +3,7 @@
 #include "qgenlib/qgen_utils.h"
 #include "qgenlib/hts_utils.h"
 #include "qpgen.h"
+#include "qpgen_utils.h"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -117,6 +118,8 @@ int32_t cmd_pgen2tsv(int32_t argc, char **argv)
     double min_af = 0.0, max_af = 1.0;
     double min_ac = 0.0, max_ac = 1e18;
     bool sparse = false;
+    bool space_delim = false; // space- instead of tab-delimited input tables
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -143,11 +146,13 @@ int32_t cmd_pgen2tsv(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output file (use .gz suffix for bgzipped output)")
     LONG_PARAM("sparse", &sparse, "Emit sparse [IDX]:[GENO] for non-REF/REF samples instead of full genotypes")
+    LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+    const char table_delim = table_delimiter(space_delim);
 
     // resolve inputs from --pfile prefix when explicit paths are not given
     if (!pfile.empty()) {
@@ -180,6 +185,7 @@ int32_t cmd_pgen2tsv(int32_t argc, char **argv)
     }
     else if (!sampf.empty()) {
         tsv_reader tr_samp(sampf.c_str());
+        tr_samp.delimiter = table_delim;
         std::vector<std::string> samp_ids;
         while (tr_samp.read_line()) samp_ids.push_back(tr_samp.str_field_at(0));
         reader.subset_sample_ids(samp_ids);
@@ -229,6 +235,7 @@ int32_t cmd_pgen2tsv(int32_t argc, char **argv)
     else {
         // ---- explicit variant indices from --var ----
         tsv_reader tr_var(varf.c_str());
+        tr_var.delimiter = table_delim;
         bool header_written = false;
         uint32_t nlines = 0;
         while (tr_var.read_line()) {

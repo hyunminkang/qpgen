@@ -36,6 +36,7 @@ qpgentools pgen2tsv --pfile [plink2_prefix] --var [variants.tsv] --idx-begin 1 -
 
 ## Additional Options
 
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 * `--sample-list` : Comma-separated list of sample IDs to include.
 * `--sample-file` : File containing the list of sample IDs to include (one per line). At most one of `--sample-list` and `--sample-file` may be given; if neither is given, all samples are included.
 * `--idx-begin` : Starting index used by `--var` (default: 0). Use `1` when the variant file holds 1-based indices, such as the `INDEX` column of an indexed pvar file.
@@ -107,6 +108,7 @@ Available Options:
 == Output options ==
    --out            [STR: ]             : Output file (use .gz suffix for bgzipped output)
    --sparse         [FLG: OFF]          : Emit sparse [IDX]:[GENO] for non-REF/REF samples instead of full genotypes
+   --space-delim    [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

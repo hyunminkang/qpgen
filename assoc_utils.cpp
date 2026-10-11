@@ -87,38 +87,56 @@ Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const 
 }
 
 CovariateResidualizer::CovariateResidualizer(const Eigen::MatrixXd& covariates)
-    : C_aug(covariates.rows(), covariates.cols() + 1)
+    : n_samples_(covariates.rows()), n_cols_((int32_t)covariates.cols() + 1)
 {
-    // [1, C]: the first column is the intercept, the remaining columns are the covariates
-    C_aug.col(0).setOnes();
-    C_aug.rightCols(covariates.cols()) = covariates;
-    qr.compute(C_aug);
+    // [1, C] with unit-norm columns: the first column is the intercept, the remaining columns
+    // are the covariates. A column that is all zero stays zero and is not counted in the rank.
+    Eigen::MatrixXd C_scaled(covariates.rows(), covariates.cols() + 1);
+    C_scaled.col(0).setOnes();
+    C_scaled.rightCols(covariates.cols()) = covariates;
+    for (Eigen::Index j = 0; j < C_scaled.cols(); ++j) {
+        const double nrm = C_scaled.col(j).norm();
+        if ( nrm > 0 ) C_scaled.col(j) /= nrm;
+    }
+    qr.setThreshold(kRankTol);
+    qr.compute(C_scaled);
     rank_ = (int32_t)qr.rank();
 }
 
 void CovariateResidualizer::residualize(Eigen::Ref<Eigen::MatrixXd> values) const {
-    if ( values.rows() != C_aug.rows() ) {
+    if ( values.rows() != n_samples_ ) {
         throw std::runtime_error("Value and covariate matrices must have the same number of rows (observations).");
     }
     if ( values.cols() == 0 ) return;
-    if ( rank_ == (int32_t)qr.nonzeroPivots() ) {
-        // least-squares fit on [1, C]; solve() ignores the pivots beyond nonzeroPivots()
-        // (the fitted values are formed before the subtraction, as in the original
-        // `values - C_aug * beta`, so full-rank results are unchanged bit for bit)
-        const Eigen::MatrixXd beta = qr.solve(values);
-        const Eigen::MatrixXd fitted = C_aug * beta;
-        values -= fitted;
+    // r = (I - Q_r Q_r') v with the first rank_ Householder vectors: the pivots beyond the rank
+    // span rounding noise (e.g. a constant or duplicated covariate) and are not projected out
+    Eigen::MatrixXd c = values;
+    const auto Q = qr.householderQ().setLength(rank_);
+    c.applyOnTheLeft(Q.adjoint());
+    c.topRows(rank_).setZero();
+    c.applyOnTheLeft(Q);
+    values = c;
+}
+
+int32_t CovariateResidualizer::residualize_genotypes(Eigen::Ref<Eigen::MatrixXd> G) const {
+    const Eigen::Index kBlockCols = 1024;
+    const Eigen::Index n = G.rows();
+    int32_t n_collinear = 0;
+    for (Eigen::Index j0 = 0; j0 < G.cols(); j0 += kBlockCols) {
+        const Eigen::Index w = std::min<Eigen::Index>(kBlockCols, G.cols() - j0);
+        auto B = G.middleCols(j0, w);
+        // centered sum of squares = sum(x^2) - n * mean(x)^2
+        const Eigen::RowVectorXd col_means = B.colwise().mean();
+        const Eigen::RowVectorXd ss_centered = B.colwise().squaredNorm() - ( (double)n * col_means.array().square() ).matrix();
+        residualize(B);
+        for (Eigen::Index j = 0; j < w; ++j) {
+            if ( !( B.col(j).squaredNorm() > kCollinearTol * ss_centered(j) ) ) {
+                B.col(j).setZero();
+                ++n_collinear;
+            }
+        }
     }
-    else {
-        // The QR keeps pivots that rank() treats as zero; their Householder vectors would project
-        // out rounding noise. Use the first rank_ vectors: r = (I - Q_r Q_r') v.
-        Eigen::MatrixXd c = values;
-        const auto Q = qr.householderQ().setLength(rank_);
-        c.applyOnTheLeft(Q.adjoint());
-        c.topRows(rank_).setZero();
-        c.applyOnTheLeft(Q);
-        values = c;
-    }
+    return n_collinear;
 }
 
 Eigen::RowVectorXd CovariateResidualizer::residual_ss(const Eigen::MatrixXd& Y) const {
@@ -1139,22 +1157,8 @@ int32_t assoc_single_trait(
 
 
 // ---- LOCO (REGENIE step-1 predictions) helpers -------------------------------
-// A REGENIE .loco file has a header "FID_IID <FID>_<IID> ..." and one row per
-// chromosome ("1".."22", "23" for X) holding the leave-that-chromosome-out
-// polygenic prediction for every sample.
+// (loco_row_t and the file format are described in assoc_utils.h)
 namespace {
-
-// Canonical chromosome label shared by region strings and .loco rows:
-// strip a "chr" prefix and map X/Y/XY/M(T) to REGENIE's numeric codes.
-std::string loco_chrom_label(const std::string& chrom) {
-    std::string c = chrom;
-    if ( c.size() > 3 && strncasecmp(c.c_str(), "chr", 3) == 0 ) c = c.substr(3);
-    if ( c == "X" || c == "x" ) return "23";
-    if ( c == "Y" || c == "y" ) return "24";
-    if ( c == "XY" || c == "xy" ) return "25";
-    if ( c == "M" || c == "MT" || c == "m" || c == "mt" ) return "26";
-    return c;
-}
 
 bool loco_file_exists(const std::string& path) {
     struct stat st;
@@ -1163,6 +1167,18 @@ bool loco_file_exists(const std::string& path) {
 
 bool is_loco_missing_str(const char* s) {
     return strcmp(s, "NA") == 0 || strcmp(s, "nan") == 0 || strcmp(s, "NaN") == 0 || strcmp(s, ".") == 0;
+}
+
+} // namespace
+
+std::string loco_chrom_label(const std::string& chrom) {
+    std::string c = chrom;
+    if ( c.size() > 3 && strncasecmp(c.c_str(), "chr", 3) == 0 ) c = c.substr(3);
+    if ( c == "X" || c == "x" ) return "23";
+    if ( c == "Y" || c == "y" ) return "24";
+    if ( c == "XY" || c == "xy" ) return "25";
+    if ( c == "M" || c == "MT" || c == "m" || c == "mt" ) return "26";
+    return c;
 }
 
 // Determine the .loco file for each trait. `locof` is either a single .loco file
@@ -1220,35 +1236,9 @@ std::vector<std::string> resolve_loco_files(const std::string& locof, const std:
     return paths;
 }
 
-// LOCO predictions of one trait for one chromosome, indexed by sample ID.
-struct loco_row_t {
-    std::unordered_map<std::string, int32_t> exact;  // FID_IID -> column
-    std::unordered_map<std::string, int32_t> suffix; // IID candidate -> column (-1 if ambiguous)
-    std::vector<double> values;                      // NaN when missing
-    std::vector<bool> observed;
-
-    // Match a phenotype/genotype sample ID (usually IID only) to a .loco column:
-    // exact FID_IID match, then FID==IID, then a unique "<FID>_<id>" suffix match.
-    int32_t find(const std::string& id) const {
-        std::unordered_map<std::string, int32_t>::const_iterator it = exact.find(id);
-        if ( it != exact.end() ) return it->second;
-        it = exact.find(id + "_" + id);
-        if ( it != exact.end() ) return it->second;
-        it = suffix.find(id);
-        if ( it != suffix.end() ) return it->second; // may be -1 when ambiguous
-        return -1;
-    }
-    // value for sample `id`; false if absent or missing
-    bool get(const std::string& id, double& val) const {
-        int32_t j = find(id);
-        if ( j < 0 || !observed[j] ) return false;
-        val = values[j];
-        return true;
-    }
-};
-
 void load_loco_row(const std::string& path, const std::string& chrom, loco_row_t& row) {
     const std::string target = loco_chrom_label(chrom);
+    row = loco_row_t();
     tsv_reader tr(path.c_str());
     if ( !tr.read_line() || strcmp(tr.str_field_at(0), "FID_IID") != 0 ) {
         error("LOCO file %s does not start with a 'FID_IID' header", path.c_str());
@@ -1269,6 +1259,7 @@ void load_loco_row(const std::string& path, const std::string& chrom, loco_row_t
             else if ( it->second != j ) it->second = -1; // ambiguous
         }
     }
+    if ( chrom.empty() ) return; // sample IDs only
     while ( tr.read_line() ) {
         if ( tr.nfields == 0 ) continue;
         if ( loco_chrom_label(tr.str_field_at(0)) != target ) continue;
@@ -1288,7 +1279,6 @@ void load_loco_row(const std::string& path, const std::string& chrom, loco_row_t
     error("LOCO file %s has no row for chromosome %s", path.c_str(), chrom.c_str());
 }
 
-} // namespace
 
 bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* pheno_format, const char* covf, const char* cov_format) {
     // if the non-necessary arguments are empty, set them to NULL
@@ -1305,10 +1295,21 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     }
 
     notice("Loading phenotype matrix from %s", phef);
-    if ( !pheno_matrix.load_pheno_matrix(phef, pheno_format) ) {
+    if ( !pheno_matrix.load_pheno_matrix(phef, pheno_format, table_delim) ) {
         error("Failed to load the phenotype matrix from file %s", phef);
     }
     if ( subset_pheno_ids.size() > 0 ) {
+        if ( subset_pheno_drop_absent ) {
+            // keep the listed traits found in the phenotype file, in sorted order
+            std::vector<std::string> found_ids;
+            identify_overlapping_ids(subset_pheno_ids, pheno_matrix.pheno_ids, found_ids);
+            notice("%zu of %zu listed phenotypes are found in the phenotype matrix of %zu phenotypes",
+                   found_ids.size(), subset_pheno_ids.size(), pheno_matrix.pheno_ids.size());
+            if ( found_ids.empty() ) {
+                error("None of the listed phenotypes are in the phenotype file %s", phef);
+            }
+            subset_pheno_ids.swap(found_ids);
+        }
         notice("Subsetting the phenotype matrix to the specified phenotypes");
         pheno_matrix.subset_pheno_ids(subset_pheno_ids);
     }
@@ -1317,7 +1318,7 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
 
     if ( covf != NULL && strlen(covf) > 0 ) {
         notice("Loading covariate matrix from %s", covf);
-        if ( !cov_matrix.load_pheno_matrix(covf, cov_format) ) {
+        if ( !cov_matrix.load_pheno_matrix(covf, cov_format, table_delim) ) {
             error("Failed to load the covariate matrix from file %s", covf);
         }
         notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf);
@@ -1389,24 +1390,33 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
                   [&geno_rank](const std::string& a, const std::string& b) { return geno_rank[a] < geno_rank[b]; });
     }
 
-    // LOCO: load the predictions for the tested chromosome, and keep only samples
-    // that have a (non-missing) LOCO prediction for every tested trait.
-    std::vector<loco_row_t> loco_rows;
+    // LOCO: keep only samples that have a LOCO prediction for every tested trait. With a fixed
+    // chromosome (region-assoc), its predictions are loaded now and a missing value also excludes
+    // the sample. In per-chromosome mode only the sample IDs are read here; a missing value in a
+    // chromosome's row is an error when that chromosome is applied.
+    loco_rows.clear();
+    loco_rows_chrom.clear();
+    loco_applied_chrom.clear();
+    loco_chroms_seen.clear();
     if ( use_loco() ) {
-        std::vector<std::string> loco_paths = resolve_loco_files(loco_file, pheno_matrix.pheno_ids, loco_kind);
+        loco_paths = resolve_loco_files(loco_file, pheno_matrix.pheno_ids, loco_kind);
         loco_rows.resize(loco_paths.size());
         for(size_t k = 0; k < loco_paths.size(); ++k) {
-            notice("Loading LOCO predictions for trait %s on chromosome %s from %s",
-                   pheno_matrix.pheno_ids[k].c_str(), loco_chrom.c_str(), loco_paths[k].c_str());
+            if ( !loco_chrom.empty() ) {
+                notice("Loading LOCO predictions for trait %s on chromosome %s from %s",
+                       pheno_matrix.pheno_ids[k].c_str(), loco_chrom.c_str(), loco_paths[k].c_str());
+            }
             load_loco_row(loco_paths[k], loco_chrom, loco_rows[k]);
         }
+        loco_rows_chrom = loco_chrom;
         std::vector<std::string> kept_ids;
         kept_ids.reserve(overlapping_sample_ids.size());
         for(size_t i = 0; i < overlapping_sample_ids.size(); ++i) {
             bool ok = true;
             double v;
             for(size_t k = 0; ok && k < loco_rows.size(); ++k) {
-                ok = loco_rows[k].get(overlapping_sample_ids[i], v);
+                ok = loco_chrom.empty() ? loco_rows[k].has(overlapping_sample_ids[i])
+                                        : loco_rows[k].get(overlapping_sample_ids[i], v);
             }
             if ( ok ) kept_ids.push_back(overlapping_sample_ids[i]);
         }
@@ -1443,6 +1453,9 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     }
     else {
         notice("No need to subset the genotype data, as the sample IDs already match the overlapping samples"); 
+    }
+    if ( mpr.get_loaded_sample_count() != (int32_t)overlapping_sample_ids.size() ) {
+        error("%d genotype samples are loaded, but %zu samples were matched across the input files", mpr.get_loaded_sample_count(), overlapping_sample_ids.size());
     }
     int32_t n_overlapping_samples = (int32_t)overlapping_sample_ids.size();
 
@@ -1481,6 +1494,13 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
                    n_cov_df, n_cov_cols, cov_resid->rank(), n_cov_df);
         }
     }
+    else if ( !pheno_matrix.has_missing ) {
+        // Without --cov the model still has an intercept: center the phenotypes. The tests assume
+        // centered phenotypes (y'y is their residual sum of squares), so an uncentered phenotype
+        // would inflate SE.
+        Eigen::RowVectorXd means = pheno_matrix.pheno_mat.colwise().mean();
+        pheno_matrix.pheno_mat.rowwise() -= means;
+    }
 
     // LOCO adjustment, following REGENIE step 2 (Pheno.cpp residualize_phenotypes,
     // Data.cpp compute_res):
@@ -1499,43 +1519,31 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
         }
         const int32_t n = (int32_t)pheno_matrix.pheno_mat.rows();
         const int32_t K = (int32_t)pheno_matrix.pheno_mat.cols();
-        if ( covf == NULL ) { // without covariates, residualize on the intercept only
-            Eigen::RowVectorXd means = pheno_matrix.pheno_mat.colwise().mean();
-            pheno_matrix.pheno_mat.rowwise() -= means;
-        }
+        // (without covariates, the phenotypes were centered above)
         const int32_t n_cov = 1 + n_cov_df; // rank of [1, C]
         if ( n - n_cov <= 0 ) {
             error("Not enough samples (%d) for %d covariates (including the intercept) to scale phenotypes for LOCO", n, n_cov);
         }
         pheno_scale = pheno_matrix.pheno_mat.colwise().norm() / std::sqrt((double)(n - n_cov));
-
-        // LOCO predictions aligned with the (subsetted) sample and trait order
-        Eigen::MatrixXd loco_mat(n, K);
-        for(int32_t i = 0; i < n; ++i) {
-            for(int32_t k = 0; k < K; ++k) {
-                double v;
-                if ( !loco_rows[k].get(pheno_matrix.samp_ids[i], v) ) {
-                    error("Missing LOCO prediction for sample %s and trait %s",
-                          pheno_matrix.samp_ids[i].c_str(), pheno_matrix.pheno_ids[k].c_str());
-                }
-                loco_mat(i, k) = v;
-            }
-        }
-
         for(int32_t k = 0; k < K; ++k) {
-            const double sd = pheno_scale(k);
-            if ( !(sd > 1e-12) ) {
+            if ( !(pheno_scale(k) > 1e-12) ) {
                 error("Covariate-adjusted phenotype %s has zero variance; cannot apply LOCO", pheno_matrix.pheno_ids[k].c_str());
             }
-            pheno_matrix.pheno_mat.col(k) = pheno_matrix.pheno_mat.col(k) / sd - loco_mat.col(k);
-            if ( !rint_after_adj ) pheno_matrix.pheno_mat.col(k) *= sd;
-            notice("LOCO-adjusted trait %s with chromosome %s predictions (residual SD before LOCO = %.6g%s)",
-                   pheno_matrix.pheno_ids[k].c_str(), loco_chrom.c_str(), sd,
-                   rint_after_adj ? "; RINT follows, so the output is on the RINT scale" : "");
+        }
+        // standardized covariate residual; apply_loco_chrom() subtracts each chromosome's
+        // predictions from it
+        pheno_loco_base.resize(n, K);
+        for(int32_t k = 0; k < K; ++k) {
+            pheno_loco_base.col(k) = pheno_matrix.pheno_mat.col(k) / pheno_scale(k);
+        }
+        if ( !loco_chrom.empty() ) {
+            apply_loco_chrom(loco_chrom);
+        }
+        else {
+            notice("LOCO predictions are subtracted per chromosome, before each chromosome's tests");
         }
     }
-
-    if ( rint_after_adj ) {
+    else if ( rint_after_adj ) {
         notice("Performing rank-based inverse normal transformation for all phenotypes after covariate adjustment");
         if ( !pheno_matrix.has_missing ) {
             pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
@@ -1548,8 +1556,61 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     // After RINT or LOCO, the phenotype is no longer orthogonal to the covariates; the Wald
     // tests then use its residual sum of squares on [1, C] (pheno_cov_rss()). The phenotype
     // itself (used by --score, SuSiE and the exports) is left unchanged.
-    pheno_transformed_after_cov = cov_resid && ( rint_after_adj || use_loco() );
+    // Without --cov this is the intercept-only fit: subtracting LOCO predictions can leave the
+    // phenotype uncentered.
+    pheno_transformed_after_cov = ( cov_resid && rint_after_adj ) || use_loco();
     return true;
+}
+
+void ind_assoc_input::apply_loco_chrom(const std::string& chrom) {
+    if ( !use_loco() ) error("apply_loco_chrom() called without --loco/--pred");
+    if ( pheno_loco_base.size() == 0 && pheno_matrix.pheno_ids.size() > 0 ) error("apply_loco_chrom() called before the phenotypes are loaded");
+    const std::string label = loco_chrom_label(chrom);
+    if ( !loco_applied_chrom.empty() && loco_chrom_label(loco_applied_chrom) == label ) return;
+    if ( loco_chroms_seen.count(label) ) {
+        notice("Chromosome %s is tested again after another chromosome: its LOCO predictions are read again (group the variants by chromosome to avoid this)", chrom.c_str());
+    }
+    const int32_t n = (int32_t)pheno_loco_base.rows();
+    const int32_t K = (int32_t)pheno_loco_base.cols();
+    if ( loco_rows_chrom.empty() || loco_chrom_label(loco_rows_chrom) != label ) {
+        for(int32_t k = 0; k < K; ++k) load_loco_row(loco_paths[k], chrom, loco_rows[k]);
+        loco_rows_chrom = chrom;
+    }
+
+    // LOCO predictions aligned with the (subsetted) sample and trait order
+    Eigen::MatrixXd loco_mat(n, K);
+    for(int32_t i = 0; i < n; ++i) {
+        for(int32_t k = 0; k < K; ++k) {
+            double v;
+            if ( !loco_rows[k].get(pheno_matrix.samp_ids[i], v) ) {
+                error("Missing LOCO prediction for sample %s and trait %s on chromosome %s",
+                      pheno_matrix.samp_ids[i].c_str(), pheno_matrix.pheno_ids[k].c_str(), chrom.c_str());
+            }
+            loco_mat(i, k) = v;
+        }
+    }
+
+    pheno_matrix.pheno_mat.resize(n, K);
+    for(int32_t k = 0; k < K; ++k) {
+        const double sd = pheno_scale(k);
+        pheno_matrix.pheno_mat.col(k) = pheno_loco_base.col(k) - loco_mat.col(k);
+        if ( !rint_after_adj ) pheno_matrix.pheno_mat.col(k) *= sd;
+        if ( K <= 20 ) {
+            notice("LOCO-adjusted trait %s with chromosome %s predictions (residual SD before LOCO = %.6g%s)",
+                   pheno_matrix.pheno_ids[k].c_str(), chrom.c_str(), sd,
+                   rint_after_adj ? "; RINT follows, so the output is on the RINT scale" : "");
+        }
+    }
+    if ( K > 20 ) {
+        notice("LOCO-adjusted %d traits with chromosome %s predictions%s", K, chrom.c_str(),
+               rint_after_adj ? "; RINT follows, so the output is on the RINT scale" : "");
+    }
+    if ( rint_after_adj ) {
+        notice("Performing rank-based inverse normal transformation for all phenotypes after the LOCO adjustment");
+        pheno_matrix.pheno_mat = rint_matrix_without_missing(pheno_matrix.pheno_mat);
+    }
+    loco_applied_chrom = chrom;
+    loco_chroms_seen.insert(label);
 }
 
 bool ind_assoc_input::process_pgenlist(const char* pgenlistf, const char* phef, const char* pheno_format, const char* covf, const char* cov_format) {
@@ -2041,9 +2102,15 @@ int32_t ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int
             error("Covariate matrix has %d rows but %d overlapping samples were expected",
                   (int32_t)cov_matrix.pheno_mat.rows(), n_overlapping_samples);
         }
-        // same fit as pheno_adj_cov_nxt_without_missing(), with the QR computed once per run
-        if ( cov_resid ) cov_resid->residualize(geno_chunk.geno_mat);
-        else geno_chunk.geno_mat = pheno_adj_cov_nxt_without_missing(geno_chunk.geno_mat, cov_matrix.pheno_mat);
+        // same fit as the phenotypes, with the QR computed once per run. Variants the covariates
+        // explain are zeroed, so the tests report NaN and SuSiE gives them no prior weight.
+        std::shared_ptr<const CovariateResidualizer> resid = cov_resid;
+        if ( !resid ) resid = std::make_shared<const CovariateResidualizer>(cov_matrix.pheno_mat);
+        const int32_t n_collinear = resid->residualize_genotypes(geno_chunk.geno_mat);
+        if ( n_collinear > 0 ) {
+            notice("%d variants in this chunk are explained by the covariates (residual variance below %g of the total) and are reported as NaN",
+                   n_collinear, CovariateResidualizer::kCollinearTol);
+        }
     }
 
 

@@ -43,6 +43,7 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
 
 ## Additional Options
 
+* `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 ### Input and sample handling
 
 * `--cov` : Input covariate matrix in Regenie or TSV format. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Covariate handling](#covariate-handling)).
@@ -90,7 +91,7 @@ estimated:
   and `y'y` is replaced by its residual sum of squares on the intercept and covariates, which
   keeps the equivalence with that OLS fit.
 * **Score test (`--score`).** The residual variance is estimated under the null model,
-  `sigma0^2 = y'y / (N - n_cov)`, where `n_cov = k + 1` counts the intercept and the linearly
+  `sigma0^2 = y'y / (N - 1 - k)`, where `1 + k` counts the intercept and the `k` linearly
   independent covariates. Then
   `SE = sqrt(sigma0^2 / x'x)`, `ZSTAT = BETA / SE`, and `LOG10P` comes from the standard normal.
   This matches REGENIE step 2 for quantitative traits.
@@ -243,7 +244,8 @@ both sides makes the reported effect the *partial* effect of the variant, and ma
     Without `--score`, `SE`, `TSTAT` and `LOG10P` use `df = N - 2 - k`, where `k` is the number of
     linearly independent covariates (see [Test statistic](#test-statistic)); the value is printed
     in the log. A redundant covariate (constant in the analyzed samples, or a linear combination of
-    others) is adjusted for once and costs no degree of freedom. Versions before this change used
+    others) is adjusted for once and costs no degree of freedom. The numerical rank is computed on the intercept and covariates scaled to unit norm, counting the pivots of a column-pivoted QR above `1e-7` times the largest one, as R's `lm()` does. A covariate that is *nearly* a linear combination of others is therefore treated as redundant too. A variant whose genotype is (numerically) a linear combination of the covariates (residual variance below `1e-8` of its total, e.g. when the variant itself is a covariate) cannot be tested: its statistics are reported as NaN, and SuSiE
+    gives it no prior weight. Versions before this change used
     `df = N - 2` with `--cov`, which made `SE` too small by a factor of
     `sqrt((N - 2 - k) / (N - 2))` (about 5% for 66 covariates and 729 samples), so `--cov` results
     differ from those versions in `SE`, `TSTAT` and `LOG10P` (and in the `--out-rss` `shat` and
@@ -260,8 +262,8 @@ step 1, following REGENIE step 2 for quantitative traits:
 
 1. RINT the raw phenotype if `--rint-before-adj` is set.
 2. Residualize the phenotype against the covariates (or just center it without `--cov`).
-3. Scale the residual to unit SD, with `SD = ||r|| / sqrt(N - n_cov)`, where `n_cov` counts the
-   intercept and the linearly independent covariates (REGENIE's `scale_Y`).
+3. Scale the residual to unit SD, with `SD = ||r|| / sqrt(N - 1 - k)`, where `1 + k` counts the
+   intercept and the `k` linearly independent covariates (REGENIE's `scale_Y`).
 4. Subtract the LOCO prediction for the chromosome of `--region`.
 5. RINT the result if `--rint-after-adj` is set. Otherwise, multiply it back by the SD from
    step 3.
@@ -362,6 +364,20 @@ provided in [`scripts/qpgen_susie_io.R`](https://github.com/hyunminkang/qpgen/bl
 **Quantities.** `X` is the `n x p` matrix of ALT-allele dosages, mean-imputed for missing
 genotypes, mean-centered, and residualized against the covariates when `--cov` is given. `y` is
 the covariate-residualized, mean-centered phenotype (one column per trait, `K` traits).
+`n_cov` (stored in the file header) is `k`, the number of linearly independent covariates
+*excluding* the intercept (0 without `--cov`), so the Wald df is `n - 2 - n_cov`.
+
+After `--rint-after-adj` or LOCO, `y` is the transformed phenotype, which is no longer exactly
+orthogonal to the covariates. `yty` and `var_y` are computed from its `y'y`, while the Wald test
+in the association file uses its residual sum of squares on the intercept and covariates (see
+[Test statistic](#test-statistic)). `BETA` and `X'y` are not affected, because `X` is
+residualized. Only the residual variance differs: it is slightly larger in SuSiE and in fits
+rebuilt from the exports than in the `.assoc` `SE`. The built-in `--susie` uses the same `y'y`,
+so it agrees with the exports exactly. The log reports the gap as the largest share of `y'y` the
+covariates explain. On the MAGE example (66 covariates, 729 samples, `--rint-after-adj`), the
+share was at most 0.15%. Refitting `susie_ss()` with the residual sum of squares instead of
+`y'y` then changed PIPs by at most 0.001 and posterior effects by at most 0.3%, and left every
+credible set unchanged.
 
 | File | Contents | susieR entry point |
 |---|---|---|
@@ -377,10 +393,25 @@ The RSS file exists for tools that take marginal statistics plus an LD matrix. `
 in-sample LD of the same residualized data. With `--cov`, `shat` and `z` therefore use
 `df = n - 2 - n_cov` (see [Test statistic](#test-statistic)), while `susie_rss()` assumes
 `df = n - 2` when it rebuilds `X'X`, `X'y` and `y'y` from `bhat` and `shat`. The helper
-`susie_from_qpgen()` multiplies `shat` by `sqrt((n - 2 - n_cov) / (n - 2))` before calling
-`susie_rss()`, which restores the exact correspondence for the default Wald statistics (it is
-approximate after `--rint-after-adj` or LOCO; pass `rescale_shat = FALSE` for files written with
-`--score`). Apply the same factor when calling `susie_rss()` directly. Note that `susie_rss()` is **not** equivalent to the
+`susie_from_qpgen()` converts `shat` to that SE before calling `susie_rss()`, using the test
+recorded in the file header:
+
+* Wald (default): `shat * sqrt((n - 2 - n_cov) / (n - 2))`
+* score (`--score`): `shat * sqrt((n - 1 - n_cov - z^2) / (n - 2))`, with `z = bhat / shat`
+
+Both conversions are exact, so the fit matches `susie_ss()` to about 1e-9 in PIP. After
+`--rint-after-adj` or LOCO, the Wald conversion is approximate, with the same small gap as
+above. Apply the same factor when calling `susie_rss()` directly. Files from versions before
+format version 2 do not record the test. For those, `susie_from_qpgen()` warns and assumes Wald;
+pass `test = "score"` for files written with `--score`. Without the conversion, the MAGE example
+`--score` files gave PIPs off by up to 0.21 and different credible sets.
+
+The same applies to `susie_rss(z = z, R = R, n = n)`. susieR converts `z` assuming
+`df = n - 2`, but the exported `z` is a t statistic with `df = n - 2 - n_cov`. Pass
+`n = n - n_cov` so that the conversion uses the right df. With `--score` files this is only
+approximate; use `bhat` and `shat` through `susie_from_qpgen()` instead. The difference is small when
+`n_cov` is small relative to `n`. It is not negligible for eQTL-style designs with many
+covariates: with 66 covariates and 729 samples, it is about 5% in `z`. Note that `susie_rss()` is **not** equivalent to the
 sufficient-statistics fit under its defaults: it fixes the residual variance
 (`estimate_residual_variance = FALSE`), which on the test data changed `sigma2` from 0.937 to
 1.285 and moved PIPs by up to 0.05. With `estimate_residual_variance = TRUE` and `bhat`, `shat`,
@@ -392,12 +423,14 @@ sufficient-statistics fit under its defaults: it fixes the residual variance
 
 ```
 char[8]   magic       "QPGNSUFF" (suff) or "QPGN_RSS" (rss)
-int32     version     1
+int32     version     2 (version 1 has no "test" field)
 int32     n           number of samples
 int32     p           number of variants
 int32     K           number of traits
 int32     n_cov       covariate degrees of freedom residualized out: the number of linearly
                       independent covariates, excluding the intercept (0 without --cov)
+int32     test        test of the .assoc statistics and the RSS bhat/shat/z:
+                      0 = Wald t-test, 1 = score test (--score)
 str       region      CHROM:BEG-END
 str[K]    trait_ids
 str[p]    variant_ids CHROM:POS:REF:ALT (ALT is the dosage allele)
@@ -440,6 +473,7 @@ con <- gzfile("out.rss.bin.gz", "rb")
 stopifnot(readChar(con, 8, useBytes = TRUE) == "QPGN_RSS")
 version <- readBin(con, "integer", 1, size = 4, endian = "little")
 d <- readBin(con, "integer", 4, size = 4, endian = "little"); n <- d[1]; p <- d[2]; K <- d[3]; n_cov <- d[4]
+test <- if (version >= 2) readBin(con, "integer", 1, size = 4, endian = "little") else 0L  # 1 = --score
 region   <- readBin(con, "character", 1)
 traits   <- readBin(con, "character", K)
 variants <- readBin(con, "character", p)
@@ -451,7 +485,8 @@ bhat <- matrix(readBin(con, "double", p * K), p, K)
 shat <- matrix(readBin(con, "double", p * K), p, K)
 var_y <- readBin(con, "double", K)
 close(con)
-shat <- shat * sqrt((n - 2 - n_cov) / (n - 2))   # Wald df n - 2 - n_cov -> susie_rss's n - 2
+shat <- if (test == 0) shat * sqrt((n - 2 - n_cov) / (n - 2)) else      # Wald df n - 2 - n_cov -> n - 2
+        shat * sqrt((n - 1 - n_cov - (bhat / shat)^2) / (n - 2))          # score SE -> Wald SE, df n - 2
 fit <- susie_rss(bhat = bhat[, 1], shat = shat[, 1], R = R, n = n, var_y = var_y[1], L = 10)
 ```
 
@@ -523,7 +558,7 @@ Available Options:
    --colname-geno-sample  [STR: geno]         : When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')
    --rint-before-adj      [FLG: OFF]          : Perform rank-based inverse normal transformation before covariate adjustment (default: false)
    --rint-after-adj       [FLG: OFF]          : Perform rank-based inverse normal transformation after covariate adjustment (default: false)
-   --score                [FLG: OFF]          : Use the REGENIE-style score test (residual variance under the null with N - n_cov df, normal p-value) and report ZSTAT instead of the Wald TSTAT
+   --score                [FLG: OFF]          : Use the REGENIE-style score test (residual variance under the null with N - 1 - k df for k linearly independent covariates, normal p-value) and report ZSTAT instead of the Wald TSTAT
 
 == SuSiE fine-mapping options ==
    --susie                [FLG: OFF]          : Run SuSiE fine-mapping for each tested phenotype in the region
@@ -537,6 +572,7 @@ Available Options:
    --ash-fix-pi           [STR: ]             : Diagnostics for --unmappable-effects ash: comma-separated mixture weights held fixed (no pi update). Requires --ash-fix-sa2 of the same length. pi=1,0,...,0 keeps theta=0 (sigma2 still comes from Mr.ASH, so this is close to, not identical to, --unmappable-effects none)
    --ash-fix-sa2          [STR: ]             : Diagnostics for --unmappable-effects ash: comma-separated prior-variance grid (in units of sigma2, first entry 0) held fixed instead of the data-driven grid rebuilt every iteration
    --output-lbf           [FLG: OFF]          : Also write per-variant log Bayes factors (one column per single effect) when running SuSiE
+   --space-delim          [FLG: OFF]          : Input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) are delimited by single spaces instead of tabs (default: tab-delimited)
 
 
 NOTES:

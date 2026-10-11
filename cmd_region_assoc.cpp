@@ -82,6 +82,8 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     // the help text names the BLAS/LAPACK backend actually loaded at run time
     const std::string threads_desc = "Number of threads for the BLAS/LAPACK linear algebra of SuSiE-inf/ash (default: 0 = library default). Linked backend: " + blas_threads::backend();
 
+    bool space_delim = false; // space- instead of tab-delimited input tables
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -129,7 +131,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("colname-geno-sample", &colname_geno_sample, "When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')")
     LONG_PARAM("rint-before-adj", &rint_before_adj, "Perform rank-based inverse normal transformation before covariate adjustment (default: false)")
     LONG_PARAM("rint-after-adj", &rint_after_adj, "Perform rank-based inverse normal transformation after covariate adjustment (default: false)")
-    LONG_PARAM("score", &score_test, "Use the REGENIE-style score test (residual variance under the null with N - n_cov df, normal p-value) and report ZSTAT instead of the Wald TSTAT")
+    LONG_PARAM("score", &score_test, "Use the REGENIE-style score test (residual variance under the null with N - 1 - k df for k linearly independent covariates, normal p-value) and report ZSTAT instead of the Wald TSTAT")
 
     LONG_PARAM_GROUP("SuSiE fine-mapping options", NULL)
     LONG_PARAM("susie", &run_susie, "Run SuSiE fine-mapping for each tested phenotype in the region")
@@ -143,11 +145,13 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("ash-fix-pi", &ash_fix_pi_str, "Diagnostics for --unmappable-effects ash: comma-separated mixture weights held fixed (no pi update). Requires --ash-fix-sa2 of the same length. pi=1,0,...,0 keeps theta=0 (sigma2 still comes from Mr.ASH, so this is close to, not identical to, --unmappable-effects none)")
     LONG_STRING_PARAM("ash-fix-sa2", &ash_fix_sa2_str, "Diagnostics for --unmappable-effects ash: comma-separated prior-variance grid (in units of sigma2, first entry 0) held fixed instead of the data-driven grid rebuilt every iteration")
     LONG_PARAM("output-lbf", &output_lbf, "Also write per-variant log Bayes factors (one column per single effect) when running SuSiE")
+    LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+    const char table_delim = table_delimiter(space_delim);
 
     // must precede the first BLAS call (Accelerate reads its setting once)
     if ( n_threads > 0 && !blas_threads::set_threads(n_threads) )
@@ -166,6 +170,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     
     // set up the association input object and configure the parameters
     ind_assoc_input input;
+    input.set_table_delimiter(table_delim);
     input.set_jump_thres_bp(jump_thres_bp);
     input.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
     input.set_rint_before_adj(rint_before_adj);
@@ -264,6 +269,20 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     const Eigen::MatrixXd XtY = col_scale.asDiagonal() * XtY_std;  // p x K, per allele
     const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
 
+    // After --rint-after-adj or LOCO, the phenotype is not orthogonal to the covariates: the
+    // Wald test uses its residual sum of squares on [1, C], while SuSiE and the exports use its
+    // y'y. Report the gap, the share of y'y the covariates explain.
+    Eigen::RowVectorXd y_rss;
+    const bool use_y_rss = input.pheno_cov_rss(Y, y_rss);
+    if ( use_y_rss ) {
+        double max_share = 0;
+        for(Eigen::Index k = 0; k < Y.cols(); ++k) {
+            if ( y_sq_norms(k) > 0 ) max_share = std::max(max_share, 1.0 - y_rss(k) / y_sq_norms(k));
+        }
+        notice("The covariates explain at most %.3g%% of the transformed phenotypes' y'y (the Wald test uses the residual sum of squares; SuSiE and --out-suff/--out-rss use y'y)",
+               100.0 * max_share);
+    }
+
     // perform rectangular association analysis
     std::vector<std::vector<slr_sumstat_t> > rect_results;
     if ( score_test ) {
@@ -279,8 +298,6 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
         // df = N - 2 - n_cov_df (rank of the covariates beyond the intercept; 0 without --cov).
         // After --rint-after-adj or LOCO the phenotype is not orthogonal to the covariates, so
         // its residual sum of squares on [1, C] replaces y'y (full OLS fit on [1, C, g]).
-        Eigen::RowVectorXd y_rss;
-        const bool use_y_rss = input.pheno_cov_rss(Y, y_rss);
         notice("Performing rectangular association analysis with the Wald t-test (df = N - 2 - %d)...", input.n_cov_df);
         if ( !simple_rect_regression_from_stats(n_samples, x_sq_norms, use_y_rss ? y_rss : y_sq_norms, XtY, rect_results, input.n_cov_df) ) {
             error("Failed to perform rectangular association analysis");
@@ -353,6 +370,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             meta.trait_ids = input.pheno_matrix.pheno_ids;
             meta.n_samples = n;
             meta.n_cov = input.n_cov_df; // = number of covariates when they are full rank
+            meta.test = score_test ? susie_export::kTestScore : susie_export::kTestWald;
             meta.variant_ids.reserve(p); meta.positions.reserve(p); meta.af.reserve(p);
             for(int32_t j = 0; j < p; ++j) {
                 const cpra_t& cpra = input.geno_chunk.v_cpra[j];
@@ -363,7 +381,12 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             }
 
             notice("Computing X'X for %d variants (%.2f GB per p x p matrix)...", p, (double)p * p * 8.0 / 1e9);
-            const Eigen::MatrixXd XtX = col_scale.asDiagonal() * design.XtX() * col_scale.asDiagonal();
+            Eigen::MatrixXd XtX = col_scale.asDiagonal() * design.XtX() * col_scale.asDiagonal();
+            // d_i * A_ij * d_j and d_j * A_ji * d_i can round differently; mirror the lower
+            // triangle so X'X is bit-exactly symmetric (susieR warns otherwise)
+            for(Eigen::Index j = 0; j < XtX.cols(); ++j) {
+                for(Eigen::Index i = j + 1; i < XtX.rows(); ++i) XtX(j, i) = XtX(i, j);
+            }
 
             if ( out_suff ) {
                 const Eigen::VectorXd yty = y_sq_norms.transpose(); // K

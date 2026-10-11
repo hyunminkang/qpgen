@@ -5,6 +5,39 @@
 #include "qpgen_utils.h"
 
 #include <cstring>
+#include <cstdlib>
+#include <cctype>
+#include <cmath>
+
+namespace {
+
+// Parses one phenotype/covariate value. A value that is not a finite number, and is not a
+// registered missing string, aborts instead of being read as 0 (atof() would silently turn
+// "NA", "XX" or "male" into 0).
+double parse_pheno_value(const char* s, const char* pheno_file, int32_t line_no, int32_t field_no)
+{
+    char* end = NULL;
+    const double v = strtod(s, &end);
+    while ( end != NULL && *end != '\0' && isspace((unsigned char)*end) ) ++end; // allow trailing '\r'
+    if ( end == s || end == NULL || *end != '\0' || !std::isfinite(v) ) {
+        error("Value '%s' at line %d, field %d of %s is not a finite number. Code categorical values (e.g. sex) as numbers, and mark missing values with a string registered as missing (--missing-str, where the command supports it)",
+              s, line_no, field_no, pheno_file);
+    }
+    return v;
+}
+
+// Aborts unless the header has a field beyond the index columns. A header that splits into too
+// few fields almost always means the file uses another delimiter than the one in effect.
+void check_header_fields(int32_t nfields, int32_t icol_data, char delim, const char* pheno_file)
+{
+    if ( nfields <= icol_data ) {
+        const char* how = ( delim == '\t' ) ? "tabs" : ( ( delim == ' ' ) ? "single spaces" : "whitespace" );
+        error("The header of %s has %d field(s) when split on %s, but at least %d are expected. Input tables are tab-delimited unless --space-delim is given; check the file's delimiter",
+              pheno_file, nfields, how, icol_data + 1);
+    }
+}
+
+} // anonymous namespace
 
 bool PhenoMatrix::subset_sample_pheno_indices(const std::vector<int32_t>& samp_indices, const std::vector<int32_t>& pheno_indices) {
     if ( samp_indices.size() == this->samp_ids.size() && pheno_indices.size() == this->pheno_ids.size() ) {
@@ -256,7 +289,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         }
         tsv_reader tr(pheno_file);
         if ( delim != '\0' ) {
-            tr.delimiter = delim; // note that defeault delimiter is whitespace
+            tr.delimiter = delim; // '\0' would split on any whitespace
         }
         // read header
         int32_t nlines = 0;
@@ -267,6 +300,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         while ( tr.read_line() ) {
             if ( nlines == 0 ) {
                 nfields = tr.nfields;
+                check_header_fields(nfields, icol_data, delim, pheno_file);
                 for ( int32_t i = icol_data; i < nfields; ++i ) {
                     pheno_ids.push_back( std::string(tr.str_field_at(i)) );
                 }
@@ -296,7 +330,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
                     }
                     else {
                         pheno_mask(nsamps, i - icol_data) = true;
-                        pheno_mat(nsamps, i - icol_data) = tr.double_field_at(i);
+                        pheno_mat(nsamps, i - icol_data) = parse_pheno_value(tr.str_field_at(i), pheno_file, nlines + 1, i + 1);
                     }
                 }
                 ++nlines;
@@ -334,7 +368,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         }
         tsv_reader tr(pheno_file);
         if ( delim != '\0' ) {
-            tr.delimiter = delim; // note that defeault delimiter is whitespace
+            tr.delimiter = delim; // '\0' would split on any whitespace
         }
         // read header
         int32_t nlines = 0;
@@ -345,6 +379,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
         while ( tr.read_line() ) {
             if ( nlines == 0 ) {
                 nfields = tr.nfields;
+                check_header_fields(nfields, icol_data, delim, pheno_file);
                 if ( has_loci ) {
                     // header names are matched case-insensitively, with an optional leading '#'
                     // (tensorQTL writes "#chr", other BED producers write "#Chr" or "#CHROM")
@@ -390,7 +425,7 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
                     }
                     else {
                         pheno_mask(i - icol_data, ntraits) = true;
-                        pheno_mat(i - icol_data, ntraits) = tr.double_field_at(i);
+                        pheno_mat(i - icol_data, ntraits) = parse_pheno_value(tr.str_field_at(i), pheno_file, nlines + 1, i + 1);
                     }
                 }
                 ++nlines;

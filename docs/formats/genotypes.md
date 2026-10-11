@@ -148,8 +148,11 @@ The chromosome names in the first column must match the names used in the indexe
 
 ## Dosages and missing genotypes
 
-* When the `.pgen` file stores dosages, `qpgentools` reads the dosage values and treats every
-  sample as non-missing.
-* When the `.pgen` file stores hard calls, missing genotypes are mean-imputed (i.e. set to the
-  allele-frequency-based mean) for the association and fine-mapping routines.
+* When the `.pgen` file stores dosages, `qpgentools` reads the dosage values. In
+  `rect-assoc` and `region-assoc`, a missing dosage is replaced by the variant's mean dosage.
+* When the `.pgen` file stores hard calls, `rect-assoc` and `region-assoc` mean-impute missing
+  genotypes (i.e. set them to the allele-frequency-based mean) for association and fine-mapping.
+* `pair-assoc` instead excludes samples with a missing genotype or dosage from that variant's
+  test (complete-case analysis), unless `--mean-impute-geno` is given. See
+  [pair-assoc](../tools/pair_assoc.md#samples-in-each-test).
 * Genotype columns are mean-centered before analysis, and monomorphic variants are dropped.

@@ -51,11 +51,12 @@ void write_header(BgzfWriter& w, const char* magic, const RegionMeta& meta, int3
     if ( (int32_t)meta.trait_ids.size() != K )
         error("susie_export: %d trait IDs but K=%d", (int32_t)meta.trait_ids.size(), K);
     w.magic(magic);
-    w.i32(1);                 // format version
+    w.i32(2);                 // format version
     w.i32(meta.n_samples);
     w.i32(p);
     w.i32(K);
     w.i32(meta.n_cov);
+    w.i32(meta.test);
     w.str(meta.region);
     for(int32_t k = 0; k < K; ++k) w.str(meta.trait_ids[k]);
     for(int32_t j = 0; j < p; ++j) w.str(meta.variant_ids[j]);

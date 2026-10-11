@@ -161,6 +161,8 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     double lambda = 0.0; // regularization parameter for Mahalanobis distance
     double weight_prs_mh = 0.5; // weight for MH distance when combining with weighted correlation
 
+    bool space_delim = false; // space- instead of tab-delimited input tables
+
     paramList pl;
 
     BEGIN_LONG_PARAMS(longParameters)
@@ -202,11 +204,13 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_INT_PARAM("auto-lambda-min-self", &auto_lambda_min_self, "Minimum number of phenotyped samples with a mapped PRS sample and observed traits required for tuning; fewer is an error (default: 100)")
     LONG_INT_PARAM("auto-lambda-min-best", &auto_lambda_min_best, "Minimum number of mapped samples whose own PRS ranks first at the tuned lambda; fewer is an error, indicating a mismatched sample mapping (default: 100; 0 disables)")
 
+    LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
     pl.Add(new longParams("Available Options", longParameters));
     pl.Read(argc, argv);
     pl.Status();
+    const char table_delim = table_delimiter(space_delim);
 
     // validate option combinations before reading any input
     if ( prsf.empty() || phef.empty() || outf.empty() ) {
@@ -249,6 +253,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     if ( !weightf.empty() ) {
         notice("Loading phenotype weights from %s", weightf.c_str());
         tsv_reader tr_weight(weightf.c_str());
+        tr_weight.delimiter = table_delim;
         while( tr_weight.read_line() ) {
             if ( tr_weight.nfields < 2 ) {
                 error("Invalid format weights file %s in line %zu starting with %s. Must containing at least 2 fields", weightf.c_str(), (int32_t)weightf.size() + 1, tr_weight.str_field_at(0) );
@@ -267,7 +272,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     // load the phenotype matrix
     PhenoMatrix pheno_matrix;
     pheno_matrix.add_missing_strs(missing_str);
-    if ( !pheno_matrix.load_pheno_matrix(phef.c_str(), pheno_format.c_str()) ) {
+    if ( !pheno_matrix.load_pheno_matrix(phef.c_str(), pheno_format.c_str(), table_delim) ) {
         error("Failed to load the phenotype matrix from file %s", phef.c_str());
     }
 
@@ -281,7 +286,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     // load the PRS matrix
     PhenoMatrix prs_matrix;
     prs_matrix.add_missing_strs(missing_str);
-    if ( !prs_matrix.load_pheno_matrix(prsf.c_str(), prs_format.c_str()) ) {
+    if ( !prs_matrix.load_pheno_matrix(prsf.c_str(), prs_format.c_str(), table_delim) ) {
         error("Failed to load the PRS matrix from file %s", prsf.c_str());
     }
     if ( prs_matrix.has_missing ) {
@@ -295,7 +300,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     if ( !covf.empty() ) {
         notice("Loading covariate matrix from %s", covf.c_str());
         cov_matrix.add_missing_strs(missing_str);
-        if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str()) ) {
+        if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str(), table_delim) ) {
             error("Failed to load the covariate matrix from file %s", covf.c_str());
         }
         notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf.c_str());
@@ -317,6 +322,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     else {
         notice("Loading trait ID mapping between PRS and phenotype files from %s", trait_mapf.c_str());
         tsv_reader tr_trait_map(trait_mapf.c_str());
+        tr_trait_map.delimiter = table_delim;
         while( tr_trait_map.read_line() ) {
             if ( tr_trait_map.nfields > 2 ) {
                 error("Invalid format trait ID mapping file %s in line %zu starting with %s. Must containing at least 2 fields", trait_mapf.c_str(), (int32_t)trait_mapf.size() + 1, tr_trait_map.str_field_at(0) );
@@ -435,6 +441,7 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     if ( has_sample_map ) {
         notice("Loading sample ID mapping between PRS and phenotype files from %s", sample_mapf.c_str());
         tsv_reader tr_sample_map(sample_mapf.c_str());
+        tr_sample_map.delimiter = table_delim;
         int32_t n_skipped_dropped = 0;
         while( tr_sample_map.read_line() ) {
             if ( tr_sample_map.nfields > 2 ) {
@@ -546,10 +553,18 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     }
     notice("%d / %zu phenotypes passed the minimum weight threshold of %.4f", n_pass_weights, weights.size(), min_weight);
 
+    // Matching on fewer than kFewTraits traits is unreliable. Such individuals are still
+    // matched and reported, with their trait count in the output, but a warning is printed.
+    const int32_t kFewTraits = 10;
+    if ( n_pass_weights < kFewTraits ) {
+        warning("Only %d phenotypes have a non-zero weight; matching on fewer than %d traits is unreliable", n_pass_weights, kFewTraits);
+    }
+
     // number of observed traits with non-zero weight per phenotyped individual
-    // TODO: a minimum number of observed traits per individual (and observed samples per trait) is a planned option
     std::vector<int32_t> n_traits_obs( n_pheno_samples, 0 );
     int32_t n_no_obs_traits = 0;
+    int32_t n_few_obs_traits = 0;
+    std::string few_obs_examples;
     for ( int32_t i = 0; i < n_pheno_samples; ++i ) {
         int32_t c = 0;
         for ( int32_t k = 0; k < n_traits; ++k ) {
@@ -557,9 +572,18 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         }
         n_traits_obs[i] = c;
         if ( c == 0 ) ++n_no_obs_traits;
+        else if ( c < kFewTraits ) {
+            if ( ++n_few_obs_traits <= 5 ) {
+                few_obs_examples += ( few_obs_examples.empty() ? "" : ", " ) + pheno_matrix.samp_ids[i] + " (" + std::to_string(c) + ")";
+            }
+        }
     }
     if ( n_no_obs_traits > 0 ) {
         notice("%d phenotyped individuals have no observed traits with non-zero weight and will be reported as NO_OBS_TRAITS", n_no_obs_traits);
+    }
+    if ( n_few_obs_traits > 0 && n_pass_weights >= kFewTraits ) {
+        warning("%d phenotyped individuals have fewer than %d observed traits with non-zero weight, so their matches are unreliable, e.g. %s%s. They are still matched; their trait count is in the output",
+                n_few_obs_traits, kFewTraits, few_obs_examples.c_str(), n_few_obs_traits > 5 ? ", ..." : "");
     }
 
     if ( !no_norm && weights.minCoeff() < 0 ) {

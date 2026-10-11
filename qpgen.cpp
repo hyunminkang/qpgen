@@ -114,9 +114,11 @@ bool PlinkReader::load_psam(const char* _psamf) {
 
         // add the sample to the list
         samps.push_back(samp);
-        std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
+        // samples are matched by IID (as in the phenotype files), whatever the FID
         ++nsamps;
-        samp2idx[iid] = nsamps;
+        if ( !samp2idx.insert(std::make_pair(samp.indID, (int32_t)nsamps)).second ) {
+            error("Duplicate IID %s in %s. Samples are matched by IID, so IIDs must be unique", samp.indID.c_str(), _psamf);
+        }
         //error("%s %s %s %d %d", iid.c_str(), samp.famID.c_str(), samp.indID.c_str(), idx_fid, idx_sex);
         //++nsamps;
     }
@@ -150,10 +152,11 @@ bool PlinkReader::load_fam(const char* _famf) {
 
         // add the sample to the list
         samps.push_back(samp);
-        std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
-        //std::string iid = samp.famID.empty() ? samp.indID : samp.famID + "_" + samp.indID;
+        // samples are matched by IID (as in the phenotype files), whatever the FID
         ++nsamps;
-        samp2idx[iid] = nsamps;
+        if ( !samp2idx.insert(std::make_pair(samp.indID, (int32_t)nsamps)).second ) {
+            error("Duplicate IID %s in %s. Samples are matched by IID, so IIDs must be unique", samp.indID.c_str(), _famf);
+        }
         //++nsamps;
     }
 
@@ -476,9 +479,11 @@ bool PgenIdxReader::load_psam(const char* _psamf) {
 
         // add the sample to the list
         samps.push_back(samp);
-        std::string iid = ( samp.famID.empty() || samp.famID.compare("0") == 0 || samp.famID == samp.indID ) ? samp.indID : (samp.famID + "_" + samp.indID);
+        // samples are matched by IID (as in the phenotype files), whatever the FID
         ++nsamps;
-        samp2idx[iid] = nsamps;
+        if ( !samp2idx.insert(std::make_pair(samp.indID, (int32_t)nsamps)).second ) {
+            error("Duplicate IID %s in %s. Samples are matched by IID, so IIDs must be unique", samp.indID.c_str(), _psamf);
+        }
         //error("%s %s %s %d %d", iid.c_str(), samp.famID.c_str(), samp.indID.c_str(), idx_fid, idx_sex);
         //++nsamps;
     }
@@ -507,8 +512,10 @@ void PgenIdxReader::subset_sample_indices(const std::vector<int32_t>& samp_indic
     else {
         samp_idx = samp_indices; // copy the indices
     }
+    // an empty subset would make the reader load every sample, misaligning the genotypes
+    // with the phenotypes
     if ( samp_idx.empty() ) {
-        notice("Warning - subset_sample_indices(): No samples to be included after subsetting");
+        error("No samples are left after subsetting the samples of %s", psamf.c_str());
     }
 }
 
@@ -526,7 +533,7 @@ void PgenIdxReader::subset_sample_ids(const std::vector<std::string>& samp_ids, 
         }
     }        
     if ( n_miss > 0 ) {
-        notice("Warning - subset_sample_ids(): %d samples are not found in the sample file %s", n_miss, psamf.c_str());
+        warning("%d of %zu requested samples are not found in the sample file %s", n_miss, samp_ids.size(), psamf.c_str());
     }
     subset_sample_indices(idx, exclude);
 }
