@@ -293,7 +293,8 @@ int32_t assoc_single_trait(
     const std::vector<int32_t>& gc0s,        // genotype counts for genotype 0
     const std::vector<int32_t>& gc1s,        // genotype counts for genotype 1
     const std::vector<int32_t>& gc2s,        // genotype counts for genotype 2
-    const std::vector<double>& infos       // infor values
+    const std::vector<double>& infos,       // infor values
+    bool n_from_geno_counts = false  // report N as the number of called genotypes (gc0+gc1+gc2) instead of the regression sample size
 );
 
 #endif // __ASSOC_UTILS_H

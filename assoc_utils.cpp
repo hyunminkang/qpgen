@@ -1045,7 +1045,8 @@ int32_t assoc_single_trait(
     const std::vector<int32_t>& gc0s,     // genotype counts of 0
     const std::vector<int32_t>& gc1s,     // genotype counts of 1
     const std::vector<int32_t>& gc2s,     // genotype counts of
-    const std::vector<double>& infos       // infor values
+    const std::vector<double>& infos,       // infor values
+    bool n_from_geno_counts  // report N as the number of called genotypes instead of the regression sample size
 ) 
 {
     std::vector<slr_sumstat_t> sumstats;
@@ -1074,7 +1075,7 @@ int32_t assoc_single_trait(
             v_cpra[i].ref.c_str(),  // REF
             v_cpra[i].alts.c_str(), // ALT
             (double)acs[i] / (double)ans[i], // AF
-            ss.n_obs, // N - number of samples
+            n_from_geno_counts ? ( gc0s[i] + gc1s[i] + gc2s[i] ) : ss.n_obs, // N - number of samples
             gc0s[i], // GC0 - genotype count 0
             gc1s[i], // GC1 - genotype count 1
             gc2s[i], // GC2 - genotype count 2

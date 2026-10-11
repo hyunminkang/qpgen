@@ -19,11 +19,11 @@ qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pa
 
 ## Additional Options
 
-* `--cov` : Input covariate matrix in Regenie, TensorQTL, or TSV format. See [Phenotype file formats](../formats/phenotypes.md) for more details.
+* `--cov` : Input covariate matrix in Regenie, TensorQTL, or TSV format. See [Phenotype file formats](../formats/phenotypes.md) for more details. When provided, **both** the phenotypes and the genotypes are residualized against the covariates (see [Covariate handling](#covariate-handling)).
 * `--sample` : Input file containing sample IDs to be used. Useful when different IDs are used in pgen and pheno files
 * `--pheno-format` : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
 * `--cov-format` : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
-* `--skip-rint` : Skip tests based on rank-based inverse normal transformation (default: false)
+* `--skip-rint` : Skip tests based on rank-based inverse normal transformation (default: false). With `--cov`, the RINT is applied to the covariate-adjusted phenotype, as `rect-assoc --rint-after-adj` does.
 * `--offset-pheno` : The number of index columns (i.e. not containing values) in the phenotype files (default: 1)
 * `--offset-cov` : The number of index columns (i.e. not containing values) in the covariate files (default: 1)
 * `--icol-pivar-idx` : 1-based column index for the variant index in the pvar file (default: 9)
@@ -34,6 +34,47 @@ qpgentools pair-assoc --pgen-list [list] --pheno [pheno] --cov [cov] --pairs [pa
 * `--colname-pair-trait` : Column name of the trait ID in the pair file (default: 'trait')
 * `--colname-pair-variant` : Column name of the variant ID in the pair file (default: 'variant')
 * `--colname-pair-region` : Column name of the region string in the pair file (default: 'region')
+
+## Covariate handling
+
+When `--cov` is supplied, the phenotypes are adjusted for the covariates by linear regression
+and the genotypes are residualized against the *same* covariates (Frisch-Waugh-Lovell), so
+that `BETA` is the partial effect of the variant. Adjusting only the phenotype -- as earlier
+versions of this command did -- leaves genotype variance that is collinear with the covariates
+(e.g. genotype PCs) in the design, which shrinks `BETA` and the test statistic.
+
+* The `_RINT` statistics use the rank-based inverse normal transform of the covariate-adjusted
+  phenotype, tested against the same residualized genotypes. They match
+  [`rect-assoc`](rect_assoc.md) with `--rint-after-adj`.
+* Missing hard-call genotypes are mean-imputed before residualization, as in `rect-assoc` and
+  [`region-assoc`](region_assoc.md), so every sample enters the regression. `N`, `A1FREQ`,
+  `N_RR`/`N_RA`/`N_AA`, and `INFO` are computed from the raw genotypes, so `N` is the number of
+  samples with a called genotype.
+* `LOG10P` uses `df = n - 2`, where `n` is the number of analyzed samples, and does not subtract the
+  number of covariates, as in `rect-assoc`. Because missing genotypes are imputed, `n` can exceed
+  the `N` column for variants with missing genotypes. With `p` covariates, the exact OLS
+  t-statistic is smaller by a factor of `sqrt((n - 2 - p) / (n - 2))`, so `LOG10P` is somewhat
+  anti-conservative when `p` is not small relative to `n` (about 5% in `TSTAT` for 66 covariates
+  and 729 samples).
+* A variant whose genotype is (numerically) a linear combination of the covariates -- residual
+  variance below `1e-8` of its total variance, e.g. when the variant itself is a covariate -- cannot
+  be tested; its `BETA`, `SE`, `TSTAT`, and `LOG10P` (and `_RINT`) are reported as NaN, and the
+  number of such tests is reported at the end of the run.
+* The covariates (with the intercept) should be full rank in the analyzed samples. A covariate that
+  is constant in the analyzed samples (e.g. sex when `--sample` keeps one sex) or a linear
+  combination of other covariates makes the adjustment numerically unstable; the command prints a
+  warning when it detects this. Drop the redundant covariates.
+
+!!! note
+    Effect sizes and p-values from `--cov` runs will therefore differ from those produced by
+    versions of `qpgentools` released before this fix. For the same covariates, `pair-assoc`,
+    [`rect-assoc`](rect_assoc.md), and [`region-assoc`](region_assoc.md) now agree on shared
+    (trait, variant) pairs. Without `--cov`, the output is unchanged.
+
+!!! warning
+    `pair-assoc` does not recognize missing-value tokens in the phenotype or covariate files:
+    a non-numeric cell such as `NA` is read as `0`, with no error. Provide phenotype and
+    covariate matrices **without missing values**.
 
 ## Expected Output
 
@@ -46,12 +87,12 @@ The output TSV file contains the following columns, largely resembling the Regen
 * `ALLELE0` : Reference allele
 * `ALLELE1` : Alternative allele
 * `A1FREQ`: Allele frequency of alternate allele
-* `N`: Sample size
+* `N`: Sample size. With `--cov`, the number of samples with a called genotype (see [Covariate handling](#covariate-handling)); without it, the number of samples with both a phenotype value and a called genotype
 * `N_RR`: Number of RR genotypes
 * `N_RA`: Number of RA genotypes
 * `N_AA`: Number of AA genotypes
 * `INFO`: Variant quality score (typically imputation quality)
-* `BETA`: Effect size for raw phenotype association
+* `BETA`: Effect size for raw phenotype association (partial effect adjusted for the covariates when `--cov` is given)
 * `SE`: Standard error for raw phenotype association
 * `TSTAT`: Test statistic for raw phenotype association
 * `LOG10P`: Log10 p-value for raw phenotype association
