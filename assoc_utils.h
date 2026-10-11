@@ -2,6 +2,7 @@
 #define __ASSOC_UTILS_H
 
 #include "Eigen/Dense"
+#include <memory>
 #include "qgenlib/qgen_error.h"
 #include "qgenlib/hts_utils.h"
 #include "qpgen.h"
@@ -35,6 +36,36 @@ public:
 
     genotype_chunk() : n_variants(0), n_skipped(0), n_samples(0), n_geno_missing(0) {}
     ~genotype_chunk() {}
+};
+
+// Least-squares residualization against [1, C] (intercept + covariates, n x (p+1)) using a
+// column-pivoting Householder QR that is computed once and reused for any number of columns.
+//
+// rank() is the numerical rank of [1, C] reported by the QR (Eigen's default threshold). When
+// the QR keeps a pivot that rank() treats as zero (e.g. a covariate that is constant in the
+// analyzed samples), the projection uses only the first rank() Householder vectors, so that a
+// rounding-noise direction is not projected out; otherwise it is the plain least-squares fit.
+//
+// n_cov_df() = rank() - 1 is the number of residual degrees of freedom the covariates use
+// beyond the intercept. After residualizing both the phenotype and the genotype (Frisch-Waugh-
+// Lovell), the Wald test of y ~ 1 + C + g has df = n - 2 - n_cov_df().
+class CovariateResidualizer {
+public:
+    explicit CovariateResidualizer(const Eigen::MatrixXd& covariates);
+    Eigen::Index n_samples() const { return C_aug.rows(); }
+    int32_t rank() const { return rank_; }
+    int32_t n_cov_df() const { return rank_ - 1; }
+    // values (n x k) <- residuals of values on [1, C]; blocks of a matrix are accepted
+    void residualize(Eigen::Ref<Eigen::MatrixXd> values) const;
+    // Residual sum of squares of each column of Y on [1, C]. Columns are processed one at a
+    // time, so a column's value does not depend on the other columns passed with it (pair-assoc,
+    // one trait at a time, and rect-/region-assoc, all traits at once, get identical values).
+    Eigen::RowVectorXd residual_ss(const Eigen::MatrixXd& Y) const;
+
+private:
+    Eigen::MatrixXd C_aug;
+    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr;
+    int32_t rank_;
 };
 
 // class containing individual-level association analysis input data
@@ -72,6 +103,26 @@ public:
     // subtracting the LOCO predictions (REGENIE's scale_Y). Empty unless LOCO is applied.
     Eigen::RowVectorXd pheno_scale;
 
+    // Covariate degrees of freedom for the Wald tests: rank of [1, C] minus 1 (the intercept is
+    // already part of df = N - 2). 0 without --cov. Set by load_pheno_cov_matrices().
+    int32_t n_cov_df;
+    // Residualizer on [1, C] (QR computed once per run); NULL without --cov.
+    std::shared_ptr<const CovariateResidualizer> cov_resid;
+    // true when the phenotype was transformed after the covariate adjustment (--rint-after-adj
+    // or LOCO), so it is no longer orthogonal to the covariates (see pheno_cov_rss()).
+    bool pheno_transformed_after_cov;
+
+    // Residual sums of squares of the columns of Y (analyzed phenotypes, in any trait order or
+    // subset) on [1, C]. The Wald tests use them in place of y'y so that they equal the OLS fit
+    // of the analyzed phenotype on [1, C, g]. Returns false, leaving rss empty, when Y is already
+    // residualized (no --cov, or no transformation after the adjustment) and y'y is exact.
+    bool pheno_cov_rss(const Eigen::MatrixXd& Y, Eigen::RowVectorXd& rss) const {
+        rss.resize(0);
+        if ( !cov_resid || !pheno_transformed_after_cov ) return false;
+        rss = cov_resid->residual_ss(Y);
+        return true;
+    }
+
     // When true, a SINGLE tested trait may have missing values: samples whose
     // phenotype is missing are excluded from the analyzed sample set (before the
     // genotype, covariate and LOCO matching), so every downstream step runs on the
@@ -88,6 +139,8 @@ public:
         drop_missing_pheno_samples = false;
         loco_kind = LOCO_ANY;
         geno_chunk_done = false;
+        n_cov_df = 0;
+        pheno_transformed_after_cov = false;
     }
     ~ind_assoc_input() {}
 
@@ -171,6 +224,7 @@ public:
 
 Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
 
+// Residuals of each column of values (n x k) on [1, covariates]; see CovariateResidualizer.
 Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates);
 
 // Covariate adjustment when some phenotype values are missing. Each trait is regressed on the covariates
@@ -193,36 +247,51 @@ struct _slr_sumstat_t {
 typedef struct _slr_sumstat_t slr_sumstat_t;
 
 double tstat2log10pval(double tstat, double df);
-bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results);
+// Wald t-tests of a centered y on each centered column of X (no intercept term).
+// n_cov_df: covariate degrees of freedom when y and X were residualized against covariates
+// (CovariateResidualizer::n_cov_df(); 0 without covariates); df = n - 2 - n_cov_df.
+// y_rss: residual sum of squares of y under the null model, used in place of y'y when y is not
+// itself residualized (e.g. RINT after the covariate adjustment); negative = use y'y.
+bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results,
+                                              int32_t n_cov_df = 0, double y_rss = -1.0);
 
+// Same with pairwise deletion of missing values; df = n_complete - 2 - n_cov_df.
 bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
                                             const Eigen::MatrixXd& X,
                                             const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
-                                            std::vector<slr_sumstat_t>& results);
+                                            std::vector<slr_sumstat_t>& results,
+                                            int32_t n_cov_df = 0);
 
+// Wald t-tests for every (column of X, column of Y) pair; n_cov_df as above. y_rss, if not
+// NULL, replaces diag(Y'Y) (see simple_linear_regression_without_missing).
 bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& Y,
     const Eigen::MatrixXd& X,
-    std::vector<std::vector<slr_sumstat_t> >& results);
+    std::vector<std::vector<slr_sumstat_t> >& results,
+    int32_t n_cov_df = 0,
+    const Eigen::RowVectorXd* y_rss = NULL);
 
 // Same Wald t-test from precomputed statistics, so callers that already hold
 // them (e.g. region-assoc, which shares X'Y with SuSiE and the export) avoid a
 // second pass over X: n samples, x_sq_norms = diag(X'X) (p), y_sq_norms =
-// diag(Y'Y) (K), xt_y = X'Y (p x K).
+// diag(Y'Y) (K) or the null-model residual sums of squares, xt_y = X'Y (p x K),
+// and df = n - 2 - n_cov_df.
 bool simple_rect_regression_from_stats(
     int n,
     const Eigen::VectorXd& x_sq_norms,
     const Eigen::RowVectorXd& y_sq_norms,
     const Eigen::MatrixXd& xt_y,
-    std::vector<std::vector<slr_sumstat_t> >& results);
+    std::vector<std::vector<slr_sumstat_t> >& results,
+    int32_t n_cov_df = 0);
 
 // -log10 of the two-sided standard normal p-value for a z statistic
 double zstat2log10pval(double zstat);
 
 // REGENIE-style score test (null-model residual variance with n - n_cov degrees
 // of freedom, normal p-value). Y and X must be centered and covariate-residualized;
-// n_cov counts the intercept. The z statistic is stored in slr_sumstat_t::tstat.
+// n_cov counts the intercept (1 + CovariateResidualizer::n_cov_df(), i.e. the rank of
+// [1, C]). The z statistic is stored in slr_sumstat_t::tstat.
 bool simple_rect_score_test_without_missing(
     const Eigen::MatrixXd& Y,
     const Eigen::MatrixXd& X,
@@ -294,7 +363,9 @@ int32_t assoc_single_trait(
     const std::vector<int32_t>& gc1s,        // genotype counts for genotype 1
     const std::vector<int32_t>& gc2s,        // genotype counts for genotype 2
     const std::vector<double>& infos,       // infor values
-    bool n_from_geno_counts = false  // report N as the number of called genotypes (gc0+gc1+gc2) instead of the regression sample size
+    bool n_from_geno_counts = false,  // report N as the number of called genotypes (gc0+gc1+gc2) instead of the regression sample size
+    int32_t n_cov_df = 0,             // covariate degrees of freedom (df = n - 2 - n_cov_df); 0 without covariates
+    double rint_y_rss = -1.0          // null-model residual sum of squares of phe_rint_vec (negative = use its y'y)
 );
 
 #endif // __ASSOC_UTILS_H

@@ -81,10 +81,17 @@ The two tests give the same `BETA = x'y / x'x` but differ in how the residual va
 estimated:
 
 * **Wald t-test (default).** The residual variance is estimated after fitting the variant,
-  `SE = sqrt((y'y - (x'y)^2 / x'x) / (N - 2) / x'x)`, and `LOG10P` comes from a t-distribution
-  with `N - 2` degrees of freedom.
+  `SE = sqrt((y'y - (x'y)^2 / x'x) / (N - 2 - k) / x'x)`, and `LOG10P` comes from a
+  t-distribution with `df = N - 2 - k` degrees of freedom. `k` is the number of linearly
+  independent covariates (the numerical rank of the intercept and covariates, minus 1; `k = 0`
+  without `--cov`). With `--cov`, `x` and `y` are covariate-residualized, so this is exactly the
+  OLS fit `y ~ 1 + covariates + genotype`. When the phenotype is transformed after the covariate
+  adjustment (`--rint-after-adj`, or LOCO), it is no longer exactly orthogonal to the covariates,
+  and `y'y` is replaced by its residual sum of squares on the intercept and covariates, which
+  keeps the equivalence with that OLS fit.
 * **Score test (`--score`).** The residual variance is estimated under the null model,
-  `sigma0^2 = y'y / (N - n_cov)`, where `n_cov` counts the intercept and the covariates. Then
+  `sigma0^2 = y'y / (N - n_cov)`, where `n_cov = k + 1` counts the intercept and the linearly
+  independent covariates. Then
   `SE = sqrt(sigma0^2 / x'x)`, `ZSTAT = BETA / SE`, and `LOG10P` comes from the standard normal.
   This matches REGENIE step 2 for quantitative traits.
 
@@ -233,9 +240,14 @@ both sides makes the reported effect the *partial* effect of the variant, and ma
 `susieR` workflow where both `X` and `y` are residualized before fitting.
 
 !!! note
-    Without `--score`, the reported `LOG10P` uses `df = N - 2` and does not subtract the number of covariates. With
-    a large sample size relative to the number of covariates the difference is negligible, but it
-    is worth keeping in mind for small `N`.
+    Without `--score`, `SE`, `TSTAT` and `LOG10P` use `df = N - 2 - k`, where `k` is the number of
+    linearly independent covariates (see [Test statistic](#test-statistic)); the value is printed
+    in the log. A redundant covariate (constant in the analyzed samples, or a linear combination of
+    others) is adjusted for once and costs no degree of freedom. Versions before this change used
+    `df = N - 2` with `--cov`, which made `SE` too small by a factor of
+    `sqrt((N - 2 - k) / (N - 2))` (about 5% for 66 covariates and 729 samples), so `--cov` results
+    differ from those versions in `SE`, `TSTAT` and `LOG10P` (and in the `--out-rss` `shat` and
+    `z`), but not in `BETA`. `--score` results are unchanged for full-rank covariates.
 
 !!! warning
     Covariate adjustment and the rank-based inverse normal transformations are currently supported
@@ -249,7 +261,7 @@ step 1, following REGENIE step 2 for quantitative traits:
 1. RINT the raw phenotype if `--rint-before-adj` is set.
 2. Residualize the phenotype against the covariates (or just center it without `--cov`).
 3. Scale the residual to unit SD, with `SD = ||r|| / sqrt(N - n_cov)`, where `n_cov` counts the
-   intercept (REGENIE's `scale_Y`).
+   intercept and the linearly independent covariates (REGENIE's `scale_Y`).
 4. Subtract the LOCO prediction for the chromosome of `--region`.
 5. RINT the result if `--rint-after-adj` is set. Otherwise, multiply it back by the SD from
    step 3.
@@ -362,7 +374,13 @@ individual-level likelihood, and `susie_ss()` on them reproduces the built-in `-
 
 The RSS file exists for tools that take marginal statistics plus an LD matrix. `bhat`, `shat` and
 `z` in it are the same values as `BETA`, `SE` and `TSTAT` (or `ZSTAT` with `--score`) in the association file, and `R` is the
-in-sample LD of the same residualized data. Note that `susie_rss()` is **not** equivalent to the
+in-sample LD of the same residualized data. With `--cov`, `shat` and `z` therefore use
+`df = n - 2 - n_cov` (see [Test statistic](#test-statistic)), while `susie_rss()` assumes
+`df = n - 2` when it rebuilds `X'X`, `X'y` and `y'y` from `bhat` and `shat`. The helper
+`susie_from_qpgen()` multiplies `shat` by `sqrt((n - 2 - n_cov) / (n - 2))` before calling
+`susie_rss()`, which restores the exact correspondence for the default Wald statistics (it is
+approximate after `--rint-after-adj` or LOCO; pass `rescale_shat = FALSE` for files written with
+`--score`). Apply the same factor when calling `susie_rss()` directly. Note that `susie_rss()` is **not** equivalent to the
 sufficient-statistics fit under its defaults: it fixes the residual variance
 (`estimate_residual_variance = FALSE`), which on the test data changed `sigma2` from 0.937 to
 1.285 and moved PIPs by up to 0.05. With `estimate_residual_variance = TRUE` and `bhat`, `shat`,
@@ -378,7 +396,8 @@ int32     version     1
 int32     n           number of samples
 int32     p           number of variants
 int32     K           number of traits
-int32     n_cov       number of covariates residualized out (0 without --cov)
+int32     n_cov       covariate degrees of freedom residualized out: the number of linearly
+                      independent covariates, excluding the intercept (0 without --cov)
 str       region      CHROM:BEG-END
 str[K]    trait_ids
 str[p]    variant_ids CHROM:POS:REF:ALT (ALT is the dosage allele)
@@ -420,7 +439,7 @@ Without the helper, the RSS file reads as:
 con <- gzfile("out.rss.bin.gz", "rb")
 stopifnot(readChar(con, 8, useBytes = TRUE) == "QPGN_RSS")
 version <- readBin(con, "integer", 1, size = 4, endian = "little")
-d <- readBin(con, "integer", 4, size = 4, endian = "little"); n <- d[1]; p <- d[2]; K <- d[3]
+d <- readBin(con, "integer", 4, size = 4, endian = "little"); n <- d[1]; p <- d[2]; K <- d[3]; n_cov <- d[4]
 region   <- readBin(con, "character", 1)
 traits   <- readBin(con, "character", K)
 variants <- readBin(con, "character", p)
@@ -432,6 +451,7 @@ bhat <- matrix(readBin(con, "double", p * K), p, K)
 shat <- matrix(readBin(con, "double", p * K), p, K)
 var_y <- readBin(con, "double", K)
 close(con)
+shat <- shat * sqrt((n - 2 - n_cov) / (n - 2))   # Wald df n - 2 - n_cov -> susie_rss's n - 2
 fit <- susie_rss(bhat = bhat[, 1], shat = shat[, 1], R = R, n = n, var_y = var_y[1], L = 10)
 ```
 

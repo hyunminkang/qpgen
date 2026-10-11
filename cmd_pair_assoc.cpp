@@ -18,13 +18,15 @@
 // with the covariates (e.g. genotype PCs) in the design, which inflates x'x and shrinks BETA
 // and the test statistic.
 //
-// The fit is the same as pheno_adj_cov_nxt_without_missing() (least squares on [1, C] via a
-// column-pivoting Householder QR), but the QR is computed once and reused for every chunk, and
-// columns are processed in blocks so that peak memory does not grow with the chunk size.
+// The fit is the shared CovariateResidualizer (least squares on [1, C] via a column-pivoting
+// Householder QR, as in pheno_adj_cov_nxt_without_missing()); the QR is computed once and reused
+// for every chunk, and columns are processed in blocks so that peak memory does not grow with
+// the chunk size. n_cov_df() (rank of [1, C] minus 1) is passed to the Wald tests, which use
+// df = N - 2 - n_cov_df().
 //
 // Missing hard-call genotypes were already mean-imputed (centered value 0) when the chunk was
 // built; as in rect-assoc, the imputed values are residualized together with the observed ones
-// and every sample enters the regression (df = N - 2), so the mask is reset to all-observed.
+// and every sample enters the regression, so the mask is reset to all-observed.
 //
 // A column whose residual sum of squares is below kCollinearTol of its centered sum of squares
 // is (numerically) a linear combination of the covariates and cannot be tested; it is set to
@@ -32,18 +34,14 @@
 class CovGenoResidualizer {
 public:
     explicit CovGenoResidualizer(const Eigen::MatrixXd& covariates)
-        : C_aug(covariates.rows(), covariates.cols() + 1)
+        : resid(covariates)
     {
-        C_aug.col(0).setOnes();
-        C_aug.rightCols(covariates.cols()) = covariates;
-        qr.compute(C_aug);
-
         // Warn when [1, C] is (nearly) rank-deficient, e.g. a covariate that is constant in the
-        // analyzed samples. The least-squares fit above (shared with the phenotype adjustment and
-        // with rect-assoc/region-assoc) then depends on rounding noise in the near-zero pivots.
-        // The rank is checked on unit-norm columns so that the check does not depend on the
-        // scale of each covariate.
-        Eigen::MatrixXd C_scaled = C_aug;
+        // analyzed samples. The rank is checked on unit-norm columns so that the check does not
+        // depend on the scale of each covariate.
+        Eigen::MatrixXd C_scaled(covariates.rows(), covariates.cols() + 1);
+        C_scaled.col(0).setOnes();
+        C_scaled.rightCols(covariates.cols()) = covariates;
         for (Eigen::Index j = 0; j < C_scaled.cols(); ++j) {
             const double nrm = C_scaled.col(j).norm();
             if ( nrm > 0 ) C_scaled.col(j) /= nrm;
@@ -51,10 +49,21 @@ public:
         Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr_scaled(C_scaled);
         qr_scaled.setThreshold(1e-10);
         const Eigen::Index rank = qr_scaled.rank();
-        if ( rank < C_aug.cols() ) {
-            warning("The intercept and %d covariates have rank %d among the %d analyzed samples: some covariates are constant or linear combinations of others. Covariate adjustment can be numerically unstable; drop the redundant covariates.",
-                    (int32_t)covariates.cols(), (int32_t)rank, (int32_t)C_aug.rows());
+        if ( rank < C_scaled.cols() || resid.rank() < C_scaled.cols() ) {
+            warning("The intercept and %d covariates have rank %d among the %d analyzed samples: some covariates are constant or linear combinations of others. They are adjusted for once, and the degrees of freedom use the rank (%d); drop the redundant covariates.",
+                    (int32_t)covariates.cols(), (int32_t)rank, (int32_t)C_scaled.rows(), resid.rank());
         }
+        notice("Covariate degrees of freedom: %d (rank of the intercept and %d covariates = %d); Wald tests use df = N - 2 - %d",
+               resid.n_cov_df(), (int32_t)covariates.cols(), resid.rank(), resid.n_cov_df());
+    }
+
+    // degrees of freedom used by the covariates beyond the intercept
+    int32_t n_cov_df() const { return resid.n_cov_df(); }
+
+    // residual sum of squares of a phenotype vector on [1, C] (for the RINT phenotype, which is
+    // computed from the covariate-adjusted phenotype and is no longer orthogonal to C)
+    double residual_ss(const Eigen::VectorXd& y) const {
+        return resid.residual_ss(y)(0);
     }
 
     // returns the number of columns set to zero because the covariates explain them
@@ -65,9 +74,9 @@ public:
         const Eigen::Index n = geno_mat.rows();
         const Eigen::Index k = geno_mat.cols();
         if ( k == 0 ) return 0;
-        if ( C_aug.rows() != n ) {
+        if ( resid.n_samples() != n ) {
             error("Covariate matrix has %d rows but the genotype matrix has %d samples",
-                  (int32_t)C_aug.rows(), (int32_t)n);
+                  (int32_t)resid.n_samples(), (int32_t)n);
         }
         int32_t n_collinear = 0;
         for (Eigen::Index j0 = 0; j0 < k; j0 += kBlockCols) {
@@ -77,8 +86,7 @@ public:
             // column means are not recomputed for every coefficient)
             const Eigen::RowVectorXd col_means = G.colwise().mean();
             const Eigen::RowVectorXd ss_centered = G.colwise().squaredNorm() - ( (double)n * col_means.array().square() ).matrix();
-            const Eigen::MatrixXd beta = qr.solve(G);
-            G -= C_aug * beta;
+            resid.residualize(G);
             for (Eigen::Index j = 0; j < w; ++j) {
                 if ( !( G.col(j).squaredNorm() > kCollinearTol * ss_centered(j) ) ) {
                     G.col(j).setZero();
@@ -94,8 +102,7 @@ public:
 private:
     static constexpr Eigen::Index kBlockCols = 1024;
     static constexpr double kCollinearTol = 1e-8;
-    Eigen::MatrixXd C_aug;
-    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr;
+    CovariateResidualizer resid;
 };
 
 int32_t cmd_pair_assoc(int32_t argc, char **argv)
@@ -309,6 +316,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
         geno_residualizer.reset(new CovGenoResidualizer(cov_matrix.pheno_mat));
     }
     int64_t n_collinear_tests = 0; // tests whose genotype is explained by the covariates
+    const int32_t n_cov_df = have_cov ? geno_residualizer->n_cov_df() : 0; // Wald df = N - 2 - n_cov_df
 
     // if ( rint_after_adj ) {
     //     notice("Performing rank-based inverse normal transformation for all phenotypes after covariate adjustment");
@@ -448,6 +456,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
 
                 bool phe_has_missing = !phe_mask_vec.all();
                 Eigen::VectorXd phe_rint_vec;
+                // with --cov, the RINT phenotype is not orthogonal to the covariates; the Wald test
+                // uses its residual sum of squares on [1, C] instead of its y'y (negative = y'y)
+                double rint_y_rss = -1.0;
                 if ( ! skip_rint ) {
                     // perform rank-based inverse normal transformation
                     notice("Performing rank-based inverse normal transformation for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
@@ -460,6 +471,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                     if ( phe_rint_vec.size() != n_overlapping_samples ) {
                         error("Rank-based inverse normal transformation failed for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
                     }
+                    if ( have_cov ) rint_y_rss = geno_residualizer->residual_ss(phe_rint_vec);
                 }
                 else {
                     notice("Skipping rank-based inverse normal transformation for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
@@ -607,7 +619,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                                 gc1s,        // genotype counts for genotype 1
                                 gc2s,        // genotype counts for genotype 2
                                 infos,      // information values
-                                have_cov    // N = called genotypes, as all samples enter the regression after FWL
+                                have_cov,   // N = called genotypes, as all samples enter the regression after FWL
+                                n_cov_df,   // df = N - 2 - n_cov_df
+                                rint_y_rss  // null-model RSS of the RINT phenotype
                             );
                             icol = 0;
                             n_col_est = 10;
@@ -657,7 +671,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                             gc1s,        // genotype counts for genotype 1
                             gc2s,        // genotype counts for genotype 2
                             infos,      // information values
-                            have_cov    // N = called genotypes, as all samples enter the regression after FWL
+                            have_cov,   // N = called genotypes, as all samples enter the regression after FWL
+                            n_cov_df,   // df = N - 2 - n_cov_df
+                            rint_y_rss  // null-model RSS of the RINT phenotype
                         );
                         icol = 0;
                         ans.clear();
@@ -696,6 +712,8 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
 
             bool phe_has_missing = !phe_mask_vec.all();
             Eigen::VectorXd phe_rint_vec;
+            // see the region-pair branch above
+            double rint_y_rss = -1.0;
             if ( ! skip_rint ) {
                 // perform rank-based inverse normal transformation
                 notice("Performing rank-based inverse normal transformation for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
@@ -708,6 +726,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                 if ( phe_rint_vec.size() != n_overlapping_samples) {
                     error("Rank-based inverse normal transformation failed for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
                 }
+                if ( have_cov ) rint_y_rss = geno_residualizer->residual_ss(phe_rint_vec);
             }
             else {
                 notice("Skipping rank-based inverse normal transformation for phenotype %s", pheno_matrix.pheno_ids[phe_idx].c_str());
@@ -861,7 +880,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
                     gc1s,        // genotype counts for genotype 1
                     gc2s,        // genotype counts for genotype 2
                     infos,      // information values
-                    have_cov    // N = called genotypes, as all samples enter the regression after FWL
+                    have_cov,   // N = called genotypes, as all samples enter the regression after FWL
+                    n_cov_df,   // df = N - 2 - n_cov_df
+                    rint_y_rss  // null-model RSS of the RINT phenotype
                 );
             }
 

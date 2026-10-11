@@ -268,16 +268,21 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
     std::vector<std::vector<slr_sumstat_t> > rect_results;
     if ( score_test ) {
         // n_cov counts the intercept, as the phenotypes and genotypes are centered
-        // (and covariate-residualized when --cov is given)
-        const int32_t n_cov = 1 + (int32_t)input.cov_matrix.pheno_mat.cols();
+        // (and covariate-residualized when --cov is given); it is the rank of [1, C]
+        const int32_t n_cov = 1 + input.n_cov_df;
         notice("Performing rectangular association analysis with the score test (n_cov = %d including the intercept)...", n_cov);
         if ( !simple_rect_score_test_from_stats(n_samples, x_sq_norms, y_sq_norms, XtY, n_cov, rect_results) ) {
             error("Failed to perform rectangular association analysis");
         }
     }
     else {
-        notice("Performing rectangular association analysis with the Wald t-test...");
-        if ( !simple_rect_regression_from_stats(n_samples, x_sq_norms, y_sq_norms, XtY, rect_results) ) {
+        // df = N - 2 - n_cov_df (rank of the covariates beyond the intercept; 0 without --cov).
+        // After --rint-after-adj or LOCO the phenotype is not orthogonal to the covariates, so
+        // its residual sum of squares on [1, C] replaces y'y (full OLS fit on [1, C, g]).
+        Eigen::RowVectorXd y_rss;
+        const bool use_y_rss = input.pheno_cov_rss(Y, y_rss);
+        notice("Performing rectangular association analysis with the Wald t-test (df = N - 2 - %d)...", input.n_cov_df);
+        if ( !simple_rect_regression_from_stats(n_samples, x_sq_norms, use_y_rss ? y_rss : y_sq_norms, XtY, rect_results, input.n_cov_df) ) {
             error("Failed to perform rectangular association analysis");
         }
     }
@@ -347,7 +352,7 @@ int32_t cmd_region_assoc(int32_t argc, char **argv)
             meta.region = region;
             meta.trait_ids = input.pheno_matrix.pheno_ids;
             meta.n_samples = n;
-            meta.n_cov = (int32_t)input.cov_matrix.pheno_mat.cols();
+            meta.n_cov = input.n_cov_df; // = number of covariates when they are full rank
             meta.variant_ids.reserve(p); meta.positions.reserve(p); meta.af.reserve(p);
             for(int32_t j = 0; j < p; ++j) {
                 const cpra_t& cpra = input.geno_chunk.v_cpra[j];

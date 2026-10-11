@@ -3,6 +3,7 @@
 #include "qgenlib/tsv_reader.h"
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <algorithm>
 #include <map>
 #include <set>
@@ -85,34 +86,63 @@ Eigen::MatrixXd bulk_adjust_for_covariates(const Eigen::MatrixXd& values, const 
     return residuals_t.transpose();
 }
 
-Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates) {
-    const long n = values.rows();
-    const long g = values.cols();
-    const long p = covariates.cols();
+CovariateResidualizer::CovariateResidualizer(const Eigen::MatrixXd& covariates)
+    : C_aug(covariates.rows(), covariates.cols() + 1)
+{
+    // [1, C]: the first column is the intercept, the remaining columns are the covariates
+    C_aug.col(0).setOnes();
+    C_aug.rightCols(covariates.cols()) = covariates;
+    qr.compute(C_aug);
+    rank_ = (int32_t)qr.rank();
+}
 
-    // --- Input Validation ---
-    // Ensure the number of observations (rows) is the same in both matrices.
-    if (n != covariates.rows()) {
+void CovariateResidualizer::residualize(Eigen::Ref<Eigen::MatrixXd> values) const {
+    if ( values.rows() != C_aug.rows() ) {
         throw std::runtime_error("Value and covariate matrices must have the same number of rows (observations).");
     }
+    if ( values.cols() == 0 ) return;
+    if ( rank_ == (int32_t)qr.nonzeroPivots() ) {
+        // least-squares fit on [1, C]; solve() ignores the pivots beyond nonzeroPivots()
+        // (the fitted values are formed before the subtraction, as in the original
+        // `values - C_aug * beta`, so full-rank results are unchanged bit for bit)
+        const Eigen::MatrixXd beta = qr.solve(values);
+        const Eigen::MatrixXd fitted = C_aug * beta;
+        values -= fitted;
+    }
+    else {
+        // The QR keeps pivots that rank() treats as zero; their Householder vectors would project
+        // out rounding noise. Use the first rank_ vectors: r = (I - Q_r Q_r') v.
+        Eigen::MatrixXd c = values;
+        const auto Q = qr.householderQ().setLength(rank_);
+        c.applyOnTheLeft(Q.adjoint());
+        c.topRows(rank_).setZero();
+        c.applyOnTheLeft(Q);
+        values = c;
+    }
+}
 
-    // --- Augment Covariate Matrix with Intercept ---
-    // We create an augmented covariate matrix `C_aug` of size n x (p+1).
-    Eigen::MatrixXd C_aug(n, p + 1);
-    C_aug.col(0).setOnes(); // First column is the intercept (all ones).
-    C_aug.rightCols(p) = covariates; // The remaining columns are the covariates.
+Eigen::RowVectorXd CovariateResidualizer::residual_ss(const Eigen::MatrixXd& Y) const {
+    Eigen::RowVectorXd rss(Y.cols());
+    Eigen::MatrixXd col(Y.rows(), 1);
+    for (Eigen::Index j = 0; j < Y.cols(); ++j) {
+        col = Y.col(j);
+        residualize(col);
+        rss(j) = col.squaredNorm();
+    }
+    return rss;
+}
 
-    // --- Solve the Least Squares Problem ---
-    // We solve for the coefficient matrix `beta` ((p+1) x g) where `values = C_aug * beta`.
-    // Eigen's `colPivHouseholderQr()` provides a robust way to solve this.
-    // This is efficient as the decomposition of C_aug is computed once and reused for all columns of values.
-    Eigen::MatrixXd beta = C_aug.colPivHouseholderQr().solve(values);
-
-    // --- Calculate Residuals ---
-    // The predicted values are `C_aug * beta`.
-    // The residuals are the original values minus the predicted values.
-    // The resulting residual matrix is in n x g format.
-    return values - (C_aug * beta);
+Eigen::MatrixXd pheno_adj_cov_nxt_without_missing(const Eigen::MatrixXd& values, const Eigen::MatrixXd& covariates) {
+    // Ensure the number of observations (rows) is the same in both matrices.
+    if (values.rows() != covariates.rows()) {
+        throw std::runtime_error("Value and covariate matrices must have the same number of rows (observations).");
+    }
+    // Least squares on [1, C] via a column-pivoting Householder QR, computed once for all
+    // columns of values; see CovariateResidualizer.
+    const CovariateResidualizer resid(covariates);
+    Eigen::MatrixXd residuals = values;
+    resid.residualize(residuals);
+    return residuals;
 }
 
 void standardize_matrix_columns_inplace(Eigen::MatrixXd& matrix,
@@ -401,7 +431,8 @@ double tstat2log10pval(double tstat, double df) {
  * @param X An Eigen::MatrixXd of size n x p (independent variables).
  * @return A std::vector of RegressionResult structs, one for each column of X.
  */
-bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results) {
+bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Eigen::MatrixXd& X, std::vector<slr_sumstat_t>& results,
+                                              int32_t n_cov_df, double y_rss) {
     int n = y.size();
     int p = X.cols();
 
@@ -414,10 +445,11 @@ bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Ei
     }
     
     // Degrees of freedom for the t-distribution
-    // For simple linear regression (one predictor), it's n - 2
-    int df = n - 2;
+    // For simple linear regression (one predictor), it's n - 2; covariates regressed out of
+    // y and X (Frisch-Waugh-Lovell) use n_cov_df more
+    int df = n - 2 - n_cov_df;
     if (df <= 0) {
-        error("Not enough data points to perform regression (n-2 = %d must be > 0).", df);
+        error("Not enough data points to perform regression (n - 2 - n_cov_df = %d must be > 0).", df);
     }
 
     results.clear();
@@ -434,12 +466,12 @@ bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Ei
     Eigen::ArrayXd betas = xt_y.array() / x_col_sq_norms.array();
 
     // 4. Calculate Sum of Squared Errors (SSE) for each regression
-    // sse_i = y'y - (x_i'y)^2 / (x_i'x_i)
-    double y_sq_norm = y.squaredNorm();
+    // sse_i = y'y - (x_i'y)^2 / (x_i'x_i), with y'y replaced by the null-model RSS if given
+    double y_sq_norm = ( y_rss >= 0 ) ? y_rss : y.squaredNorm();
     Eigen::ArrayXd sse = y_sq_norm - (xt_y.array().square() / x_col_sq_norms.array());
 
     // 5. Calculate standard errors for all betas
-    // se(beta_i) = sqrt( (sse_i / (n-2)) / (x_i'x_i) )
+    // se(beta_i) = sqrt( (sse_i / df) / (x_i'x_i) )
     Eigen::ArrayXd std_errors = (sse / (df * x_col_sq_norms.array())).sqrt();
 
     // 6. Calculate t-statistics for all betas
@@ -462,17 +494,23 @@ bool simple_linear_regression_without_missing(const Eigen::VectorXd& y, const Ei
 bool simple_rect_regression_without_missing(
     const Eigen::MatrixXd& Y,
     const Eigen::MatrixXd& X,
-    std::vector<std::vector<slr_sumstat_t>>& results) {
+    std::vector<std::vector<slr_sumstat_t>>& results,
+    int32_t n_cov_df,
+    const Eigen::RowVectorXd* y_rss) {
     const int n = Y.rows();
 
     if (n != X.rows()) {
         error("Matrix dimensions do not match : Y is (%d x %d) while X is (%d x %d)", Y.rows(), Y.cols(), X.rows(), X.cols());
     }
 
+    if ( y_rss != NULL && y_rss->size() != Y.cols() ) {
+        error("Null-model residual sums of squares are given for %d traits, but Y has %d columns", (int32_t)y_rss->size(), (int32_t)Y.cols());
+    }
+
     const Eigen::VectorXd x_sq_norms = X.colwise().squaredNorm();
-    const Eigen::RowVectorXd y_sq_norms = Y.colwise().squaredNorm();
+    const Eigen::RowVectorXd y_sq_norms = ( y_rss != NULL ) ? *y_rss : Eigen::RowVectorXd(Y.colwise().squaredNorm());
     const Eigen::MatrixXd xt_y = X.transpose() * Y;
-    return simple_rect_regression_from_stats(n, x_sq_norms, y_sq_norms, xt_y, results);
+    return simple_rect_regression_from_stats(n, x_sq_norms, y_sq_norms, xt_y, results, n_cov_df);
 }
 
 bool simple_rect_regression_from_stats(
@@ -480,13 +518,15 @@ bool simple_rect_regression_from_stats(
     const Eigen::VectorXd& x_sq_norms,
     const Eigen::RowVectorXd& y_sq_norms,
     const Eigen::MatrixXd& xt_y,
-    std::vector<std::vector<slr_sumstat_t>>& results) {
+    std::vector<std::vector<slr_sumstat_t>>& results,
+    int32_t n_cov_df) {
     const int num_x = (int)xt_y.rows();
     const int num_y = (int)xt_y.cols();
 
-    const int df = n - 2;
+    // n - 2 for the intercept and the variant, minus the covariate degrees of freedom
+    const int df = n - 2 - n_cov_df;
     if (df <= 0) {
-        error("Not enough data points to perform regression (n-2 = %d must be > 0).", df);
+        error("Not enough data points to perform regression (n - 2 - n_cov_df = %d must be > 0).", df);
     }
 
     results.clear();
@@ -631,7 +671,8 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
                                             const Eigen::Vector<bool, Eigen::Dynamic>& y_mask,
                                             const Eigen::MatrixXd& X,
                                             const Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic>& X_mask,
-                                            std::vector<slr_sumstat_t>& results) {
+                                            std::vector<slr_sumstat_t>& results,
+                                            int32_t n_cov_df) {
     const int n_total = y.size();
     const int p = X.cols();
 
@@ -666,7 +707,7 @@ bool simple_linear_regression_with_missing( const Eigen::VectorXd& y,
         ss.n_obs = n_complete;
 
         // 2. Check for sufficient data to perform regression
-        const int df = n_complete - 2;
+        const int df = n_complete - 2 - n_cov_df;
         if (df <= 0) {
             ss.beta = std::numeric_limits<double>::quiet_NaN();
             ss.se = std::numeric_limits<double>::quiet_NaN();
@@ -1046,21 +1087,23 @@ int32_t assoc_single_trait(
     const std::vector<int32_t>& gc1s,     // genotype counts of 1
     const std::vector<int32_t>& gc2s,     // genotype counts of
     const std::vector<double>& infos,       // infor values
-    bool n_from_geno_counts  // report N as the number of called genotypes instead of the regression sample size
+    bool n_from_geno_counts, // report N as the number of called genotypes instead of the regression sample size
+    int32_t n_cov_df,        // covariate degrees of freedom (df = n - 2 - n_cov_df)
+    double rint_y_rss        // null-model residual sum of squares of phe_rint_vec (negative = its y'y)
 ) 
 {
     std::vector<slr_sumstat_t> sumstats;
     std::vector<slr_sumstat_t> sumstats_rint;
     if ( !geno_has_missing && !phe_has_missing ) {
-        simple_linear_regression_without_missing(phe_vec, geno_mat, sumstats);
+        simple_linear_regression_without_missing(phe_vec, geno_mat, sumstats, n_cov_df);
         if ( ! skip_rint ) {
-            simple_linear_regression_without_missing(phe_rint_vec, geno_mat, sumstats_rint);
+            simple_linear_regression_without_missing(phe_rint_vec, geno_mat, sumstats_rint, n_cov_df, rint_y_rss);
         }
     }
     else {
-        simple_linear_regression_with_missing(phe_vec, phe_mask_vec, geno_mat, geno_mask, sumstats);
+        simple_linear_regression_with_missing(phe_vec, phe_mask_vec, geno_mat, geno_mask, sumstats, n_cov_df);
         if ( ! skip_rint ) {
-            simple_linear_regression_with_missing(phe_rint_vec, phe_mask_vec, geno_mat, geno_mask, sumstats_rint);
+            simple_linear_regression_with_missing(phe_rint_vec, phe_mask_vec, geno_mat, geno_mask, sumstats_rint, n_cov_df);
         }
     }
 
@@ -1415,13 +1458,27 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
     }
 
     // perform covariate adjustment
+    n_cov_df = 0;
+    cov_resid.reset();
+    pheno_transformed_after_cov = false;
     if ( covf != NULL ) {
         notice("Adjusting phenotypes by covariates using linear regression");
         if ( pheno_matrix.has_missing || cov_matrix.has_missing ) {
             error("Covariate adjustment is currently only supported for phenotype and covariate matrices without missing values");
         }
         else {
-            pheno_matrix.pheno_mat = pheno_adj_cov_nxt_without_missing(pheno_matrix.pheno_mat, cov_matrix.pheno_mat);
+            std::shared_ptr<CovariateResidualizer> resid(new CovariateResidualizer(cov_matrix.pheno_mat));
+            resid->residualize(pheno_matrix.pheno_mat);
+            cov_resid = resid;
+            // the Wald tests lose one degree of freedom per (linearly independent) covariate
+            n_cov_df = cov_resid->n_cov_df();
+            const int32_t n_cov_cols = (int32_t)cov_matrix.pheno_mat.cols();
+            if ( n_cov_df < n_cov_cols ) {
+                warning("The intercept and %d covariates have numerical rank %d among the %d analyzed samples: some covariates are constant or linear combinations of others. They are adjusted for once, and the degrees of freedom use the rank; drop the redundant covariates.",
+                        n_cov_cols, cov_resid->rank(), n_overlapping_samples);
+            }
+            notice("Covariate degrees of freedom: %d (rank of the intercept and %d covariates = %d); Wald tests use df = N - 2 - %d",
+                   n_cov_df, n_cov_cols, cov_resid->rank(), n_cov_df);
         }
     }
 
@@ -1446,7 +1503,7 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
             Eigen::RowVectorXd means = pheno_matrix.pheno_mat.colwise().mean();
             pheno_matrix.pheno_mat.rowwise() -= means;
         }
-        const int32_t n_cov = 1 + ( covf != NULL ? (int32_t)cov_matrix.pheno_mat.cols() : 0 );
+        const int32_t n_cov = 1 + n_cov_df; // rank of [1, C]
         if ( n - n_cov <= 0 ) {
             error("Not enough samples (%d) for %d covariates (including the intercept) to scale phenotypes for LOCO", n, n_cov);
         }
@@ -1487,6 +1544,11 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
             error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
         }
     }
+
+    // After RINT or LOCO, the phenotype is no longer orthogonal to the covariates; the Wald
+    // tests then use its residual sum of squares on [1, C] (pheno_cov_rss()). The phenotype
+    // itself (used by --score, SuSiE and the exports) is left unchanged.
+    pheno_transformed_after_cov = cov_resid && ( rint_after_adj || use_loco() );
     return true;
 }
 
@@ -1979,7 +2041,9 @@ int32_t ind_assoc_input::load_genotype_chunk(const char* chrom, int32_t beg, int
             error("Covariate matrix has %d rows but %d overlapping samples were expected",
                   (int32_t)cov_matrix.pheno_mat.rows(), n_overlapping_samples);
         }
-        geno_chunk.geno_mat = pheno_adj_cov_nxt_without_missing(geno_chunk.geno_mat, cov_matrix.pheno_mat);
+        // same fit as pheno_adj_cov_nxt_without_missing(), with the QR computed once per run
+        if ( cov_resid ) cov_resid->residualize(geno_chunk.geno_mat);
+        else geno_chunk.geno_mat = pheno_adj_cov_nxt_without_missing(geno_chunk.geno_mat, cov_matrix.pheno_mat);
     }
 
 

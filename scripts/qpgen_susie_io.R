@@ -81,10 +81,21 @@ susie_from_qpgen_suff <- function(ss, trait = 1, ...) {
 ## X'y and y'y from R, n and var_y, but susie_rss() fixes the residual
 ## variance by default; pass estimate_residual_variance = TRUE to reproduce
 ## the sufficient-statistics fit (matches susie_ss() to ~1e-9 on in-sample R).
-susie_from_qpgen_rss <- function(rss, trait = 1, ...) {
+##
+## shat in the file is the Wald SE with df = n - 2 - n_cov (n_cov = covariate
+## degrees of freedom, from the header), whereas susie_rss() assumes df = n - 2
+## when it rebuilds X'X, X'y and y'y. Unless rescale_shat = FALSE, shat is
+## therefore multiplied by sqrt((n - 2 - n_cov) / (n - 2)) first (no change
+## without covariates). This is exact for the default Wald statistics; it is
+## approximate (relative error ~ the share of the transformed phenotype's
+## variance explained by the covariates, typically < 1e-3) with
+## --rint-after-adj or LOCO, and not meaningful for files written with --score.
+susie_from_qpgen_rss <- function(rss, trait = 1, rescale_shat = TRUE, ...) {
   if (is.character(trait)) trait <- match(trait, rss$traits)
   if (is.na(trait)) stop("trait not found in file")
-  susieR::susie_rss(bhat = rss$bhat[, trait], shat = rss$shat[, trait], R = rss$R,
+  shat <- rss$shat[, trait]
+  if (rescale_shat) shat <- shat * sqrt((rss$n - 2 - rss$n_cov) / (rss$n - 2))
+  susieR::susie_rss(bhat = rss$bhat[, trait], shat = shat, R = rss$R,
                     n = rss$n, var_y = unname(rss$var_y[trait]), ...)
 }
 
@@ -96,7 +107,7 @@ susie_from_qpgen <- function(obj, trait = 1, ...) {
 
 ## Derive the RSS quantities (bhat, shat, z, R, var_y) from sufficient
 ## statistics, using the same formulas as region-assoc's marginal test
-## (centered X and y, no intercept, df = n - 2). Provided for convenience
+## (centered X and y, no intercept, df = n - 2 - n_cov). Provided for convenience
 ## (e.g. to feed other RSS-based tools); not needed to run susieR.
 suff_to_rss <- function(ss, trait = 1) {
   if (is.character(trait)) trait <- match(trait, ss$traits)
@@ -104,7 +115,7 @@ suff_to_rss <- function(ss, trait = 1) {
   Xty  <- ss$Xty[, trait]
   bhat <- Xty / d
   sse  <- pmax(ss$yty[trait] - Xty^2 / d, 0)
-  shat <- sqrt(sse / (ss$n - 2) / d)
+  shat <- sqrt(sse / (ss$n - 2 - ss$n_cov) / d)
   R    <- cov2cor(ss$XtX); R <- (R + t(R)) / 2   # bit-exact symmetry
   list(bhat = bhat, shat = shat, z = bhat / shat, R = R, n = ss$n,
        var_y = unname(ss$yty[trait]) / (ss$n - 1))

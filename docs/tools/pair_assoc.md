@@ -45,31 +45,42 @@ versions of this command did -- leaves genotype variance that is collinear with 
 
 * The `_RINT` statistics use the rank-based inverse normal transform of the covariate-adjusted
   phenotype, tested against the same residualized genotypes. They match
-  [`rect-assoc`](rect_assoc.md) with `--rint-after-adj`.
+  [`rect-assoc`](rect_assoc.md) with `--rint-after-adj`. Because the transformed phenotype is no
+  longer exactly orthogonal to the covariates, its residual sum of squares on the intercept and
+  covariates replaces `y'y` in the residual variance, so the `_RINT` statistics are those of the
+  OLS fit `RINT(adjusted y) ~ 1 + covariates + genotype`.
 * Missing hard-call genotypes are mean-imputed before residualization, as in `rect-assoc` and
   [`region-assoc`](region_assoc.md), so every sample enters the regression. `N`, `A1FREQ`,
   `N_RR`/`N_RA`/`N_AA`, and `INFO` are computed from the raw genotypes, so `N` is the number of
   samples with a called genotype.
-* `LOG10P` uses `df = n - 2`, where `n` is the number of analyzed samples, and does not subtract the
-  number of covariates, as in `rect-assoc`. Because missing genotypes are imputed, `n` can exceed
-  the `N` column for variants with missing genotypes. With `p` covariates, the exact OLS
-  t-statistic is smaller by a factor of `sqrt((n - 2 - p) / (n - 2))`, so `LOG10P` is somewhat
-  anti-conservative when `p` is not small relative to `n` (about 5% in `TSTAT` for 66 covariates
-  and 729 samples).
+* `SE`, `TSTAT` and `LOG10P` (and the `_RINT` columns) use the residual degrees of freedom of the
+  full model `y ~ 1 + covariates + genotype`: `df = n - 2 - k`, where `n` is the number of analyzed
+  samples and `k` is the number of linearly independent covariates (the numerical rank of the
+  intercept and covariates, minus 1; `k` equals the number of covariates when they are full
+  rank). `BETA`, `SE`, `TSTAT` and `LOG10P` therefore equal those of an ordinary least-squares
+  fit with the covariates in the model. Because missing genotypes are imputed, `n` can exceed the
+  `N` column for variants with missing genotypes. Without `--cov`, `df = n - 2` as before. The
+  value of `k` is printed in the log.
 * A variant whose genotype is (numerically) a linear combination of the covariates -- residual
   variance below `1e-8` of its total variance, e.g. when the variant itself is a covariate -- cannot
   be tested; its `BETA`, `SE`, `TSTAT`, and `LOG10P` (and `_RINT`) are reported as NaN, and the
   number of such tests is reported at the end of the run.
-* The covariates (with the intercept) should be full rank in the analyzed samples. A covariate that
-  is constant in the analyzed samples (e.g. sex when `--sample` keeps one sex) or a linear
-  combination of other covariates makes the adjustment numerically unstable; the command prints a
-  warning when it detects this. Drop the redundant covariates.
+* A covariate that is constant in the analyzed samples (e.g. sex when `--sample` keeps one sex) or
+  a linear combination of other covariates is redundant. The adjustment uses the numerical rank of
+  the intercept and covariates, so a redundant covariate is adjusted for once and costs no degree
+  of freedom; the results equal those obtained without it. The command prints a warning when it
+  detects redundant covariates; dropping them is still recommended.
 
 !!! note
     Effect sizes and p-values from `--cov` runs will therefore differ from those produced by
     versions of `qpgentools` released before this fix. For the same covariates, `pair-assoc`,
     [`rect-assoc`](rect_assoc.md), and [`region-assoc`](region_assoc.md) now agree on shared
     (trait, variant) pairs. Without `--cov`, the output is unchanged.
+
+    Earlier versions also used `df = n - 2` with `--cov`, ignoring the covariates. Their `SE` was
+    too small by a factor of `sqrt((n - 2 - k) / (n - 2))` and their `LOG10P` too large (about 5% in
+    `TSTAT` for 66 covariates and 729 samples). `BETA` is unchanged by the degrees-of-freedom
+    correction.
 
 !!! warning
     `pair-assoc` does not recognize missing-value tokens in the phenotype or covariate files:

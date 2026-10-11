@@ -160,6 +160,13 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     // adjust the genotype matrix against the same covariates as well.
     const bool have_cov = !covf.empty() && input.cov_matrix.pheno_mat.cols() > 0;
 
+    // Wald degrees of freedom: df = N - 2 - n_cov_df, where n_cov_df is the rank of the
+    // covariates beyond the intercept (0 without --cov). With --rint-after-adj the phenotype is
+    // not orthogonal to the covariates, so its residual sum of squares on [1, C] replaces y'y.
+    const int32_t n_cov_df = have_cov ? input.n_cov_df : 0;
+    Eigen::RowVectorXd y_rss;
+    const bool use_y_rss = have_cov && input.pheno_cov_rss(pheno_matrix.pheno_mat, y_rss);
+
     // open the output file gz or plain based on the extension
     htsFile* wf = hts_open(outf.c_str(), outf.substr(outf.length() - 3).compare(".gz") == 0 ? "wz" : "w");
     if ( wf == NULL ) {
@@ -306,7 +313,7 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
                 error("Covariate matrix has %d rows but %d overlapping samples were expected",
                       (int32_t)input.cov_matrix.pheno_mat.rows(), n_overlapping_samples);
             }
-            geno_mat = pheno_adj_cov_nxt_without_missing(geno_mat, input.cov_matrix.pheno_mat);
+            input.cov_resid->residualize(geno_mat); // same fit as pheno_adj_cov_nxt_without_missing(), QR computed once
         }
 
         // perform rectangular association analysis
@@ -315,7 +322,9 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
         if ( !simple_rect_regression_without_missing(
                 pheno_matrix.pheno_mat,
                 geno_mat,
-                rect_results) ) {
+                rect_results,
+                n_cov_df,
+                use_y_rss ? &y_rss : NULL) ) {
             error("Failed to perform rectangular association analysis for chunk %d", i / max_chunk_vars + 1);
         }
 

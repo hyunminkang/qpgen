@@ -49,7 +49,21 @@ versions of this command did -- leaves genotype variance that is collinear with 
     versions of `qpgentools` released before this fix. [`region-assoc`](region_assoc.md) applies
     the same treatment, so the two commands now agree on shared variants.
 
-    `LOG10P` uses `df = N - 2` and does not subtract the number of covariates.
+    `SE`, `TSTAT` and `LOG10P` use the residual degrees of freedom of the full model
+    `y ~ 1 + covariates + genotype`, `df = N - 2 - k`, where `N` is the number of analyzed samples
+    and `k` is the number of linearly independent covariates (the numerical rank of the intercept
+    and covariates, minus 1; the number of covariates when they are full rank). The statistics are
+    therefore those of an ordinary least-squares fit with the covariates in the model; a redundant
+    covariate (constant in the analyzed samples, or a linear combination of others) is adjusted
+    for once and costs no degree of freedom. With `--rint-after-adj`, the transformed phenotype
+    is no longer exactly orthogonal to the covariates, and its residual sum of squares on the
+    intercept and covariates replaces `y'y` in the residual variance. Without `--cov`,
+    `df = N - 2`.
+
+    Versions before this change used `df = N - 2` with `--cov` as well, which made `SE` too small
+    by a factor of `sqrt((N - 2 - k) / (N - 2))` (about 5% for 66 covariates and 729 samples);
+    `--cov` results therefore differ from those versions in `SE`, `TSTAT` and `LOG10P`, but not in
+    `BETA`.
 
 !!! warning
     Covariate adjustment and the rank-based inverse normal transformations are currently supported
