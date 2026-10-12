@@ -18,6 +18,10 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     std::string pgenlistf;  // CHROM BEG END PGEN PSAM PIVAR containing the list of region-specific BED files
     std::string phef;
     std::string covf;
+    std::string missing_str("NA"); // comma-separated strings marking missing phenotype/covariate values
+    std::string cov_names;       // covariates to use (--cov-names); empty = all
+    std::string cat_cov_names;   // categorical covariates (--cat-cov-names)
+    int32_t max_cat_levels = 10; // REGENIE's --maxCatLevels
     std::string varlistf;   // List of variants to be tested
     std::string phelistf;   // List of phenotypes to be tested
     std::string outf;
@@ -29,8 +33,6 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     int32_t jump_thres_bp = 1000000;
     int32_t max_chunk_vars = 100; // Maximum number of variants to store at once in memory
     int32_t icol_pivar_idx = 9;
-    int32_t icol_pheno_id = 1;
-    int32_t icol_cov_id = 1;
     double min_maf = 1e-10;
     double min_mac = 1.0;
     bool rint_before_adj = false; // Perform rank-based inverse normal transformation before covariate adjustment
@@ -55,6 +57,10 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("pheno-list", &phelistf, "Input file containing the list of phenotypes to be tested. If not provided, all phenotypes in the phenotype matrix will be tested.")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("missing-str", &missing_str, "Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). rect-assoc tests all traits on the same samples, so a missing value in a tested phenotype or a used covariate stops the run")
+    LONG_STRING_PARAM("cov-names", &cov_names, QPGEN_COV_NAMES_HELP)
+    LONG_STRING_PARAM("cat-cov-names", &cat_cov_names, QPGEN_CAT_COV_NAMES_HELP)
+    LONG_INT_PARAM("max-cat-levels", &max_cat_levels, QPGEN_MAX_CAT_LEVELS_HELP)
 
     LONG_PARAM_GROUP("Output options", NULL)
     LONG_STRING_PARAM("out", &outf, "Output prefix")
@@ -69,8 +75,6 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Auxiliary options", NULL)
     LONG_INT_PARAM("jump-thres-bp", &jump_thres_bp, "Jump threshold in base pairs for the variant index (default: 1000000)")
     LONG_INT_PARAM("icol-pivar-idx", &icol_pivar_idx, "1-based column index for the variant ID in the pvar file (default: 9)")
-    LONG_INT_PARAM("icol-pheno-id", &icol_pheno_id, "1-based column index for the phenotype ID in the phenotype file (default: 1)")
-    LONG_INT_PARAM("icol-cov-id", &icol_cov_id, "1-based column index for the covariate ID in the phenotype file (default: 1)")
     LONG_PARAM("space-delim", &space_delim, QPGEN_SPACE_DELIM_HELP)
     END_LONG_PARAMS();
 
@@ -78,6 +82,12 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     pl.Read(argc, argv);
     pl.Status();
     const char table_delim = table_delimiter(space_delim);
+    if ( !cat_cov_names.empty() && covf.empty() ) {
+        error("--cat-cov-names requires --cov");
+    }
+    if ( !cov_names.empty() && covf.empty() ) {
+        error("--cov-names requires --cov");
+    }
 
     // check required arguments
     if ( phef.empty() ) {
@@ -95,6 +105,10 @@ int32_t cmd_rect_assoc(int32_t argc, char **argv)
     // matrix plus the overlapping sample IDs we need to load genotypes against.
     ind_assoc_input input;
     input.set_table_delimiter(table_delim);
+    input.set_categorical_covariates(split_comma_list(cat_cov_names), max_cat_levels);
+    input.set_covariate_columns(expand_name_ranges(cov_names));
+    input.pheno_matrix.add_missing_strs(missing_str);
+    input.cov_matrix.add_missing_strs(missing_str);
     input.set_jump_thres_bp(jump_thres_bp);
     input.set_icol_pivar_idx(icol_pivar_idx - 1); // convert to 0-based index
     input.set_rint_before_adj(rint_before_adj);

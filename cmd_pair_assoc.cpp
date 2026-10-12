@@ -350,6 +350,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     std::string pgenlistf;      // CHROM BEG END PGEN PSAM PIVAR containing the list of region-specific BED files
     std::string phef;
     std::string covf;
+    std::string cov_names;       // covariates to use (--cov-names); empty = all
+    std::string cat_cov_names;   // categorical covariates (--cat-cov-names)
+    int32_t max_cat_levels = 10; // REGENIE's --maxCatLevels
     std::string pairf;
     std::string outf;
     std::string samplef;
@@ -358,11 +361,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     std::string predf;      // REGENIE step-1 *_pred.list: [pheno_id] [path_to_loco] per line
     int32_t jump_thres_bp = 1000000;
     int32_t max_chunk_vars = 1000; // Maximum number of variants to store at once in memory
-    int32_t offset_pheno = 1;
-    int32_t offset_cov = 1;
     int32_t icol_pivar_idx = 9;
-    int32_t icol_pheno_id = 1;
-    int32_t icol_cov_id = 1;
     std::string pheno_format("regenie");
     std::string cov_format("regenie");
     std::string colname_pheno_sample("pheno"); // column name for the sample IDs in the phenotype file
@@ -389,6 +388,9 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     LONG_STRING_PARAM("cov", &covf, "Input covariate matrix (optional)")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("cov-names", &cov_names, QPGEN_COV_NAMES_HELP)
+    LONG_STRING_PARAM("cat-cov-names", &cat_cov_names, QPGEN_CAT_COV_NAMES_HELP)
+    LONG_INT_PARAM("max-cat-levels", &max_cat_levels, QPGEN_MAX_CAT_LEVELS_HELP)
     LONG_STRING_PARAM("loco", &locof, "REGENIE step-1 LOCO predictions of a single trait (.loco file). For each chromosome, the covariate-adjusted phenotype is scaled to unit SD, that chromosome's prediction is subtracted, and the result is rescaled to the original SD for BETA/SE (the _RINT statistics use the RINT of the unscaled result, as REGENIE --apply-rerint)")
     LONG_STRING_PARAM("pred", &predf, "REGENIE step-1 *_pred.list file for one or more traits: one '[pheno_id] [path_to_loco]' line per trait (relative paths are resolved against the list's directory). Each tested trait must be listed. Same LOCO adjustment as --loco")
     LONG_STRING_PARAM("missing-str", &missing_str, "Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). Samples with a missing phenotype are excluded from that trait's tests; samples with a missing covariate are excluded from all tests")
@@ -400,11 +402,7 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     LONG_PARAM_GROUP("Auxiliary options", NULL)
     LONG_INT_PARAM("jump-thres-bp", &jump_thres_bp, "Jump threshold in base pairs for the variant index (default: 1000000)")
     LONG_INT_PARAM("max-chunk-vars", &max_chunk_vars, "Maximum number of variants to store at once in memory (default: 1000)")
-    LONG_INT_PARAM("offset-pheno", &offset_pheno, "The number of index columns (i.e. not containing values) in the phenotype files (default: 1)")
-    LONG_INT_PARAM("offset-cov", &offset_cov, "The number of index columns (i.e. not containing values) in the covariate columns (default: 1)")
     LONG_INT_PARAM("icol-pivar-idx", &icol_pivar_idx, "1-based column index for the variant ID in the pvar file (default: 9)")
-    LONG_INT_PARAM("icol-pheno-id", &icol_pheno_id, "1-based column index for the phenotype ID in the phenotype file (default: 1)")
-    LONG_INT_PARAM("icol-cov-id", &icol_cov_id, "1-based column index for the covariate ID in the phenotype file (default: 1)")
     LONG_STRING_PARAM("colname-pheno-sample", &colname_pheno_sample, "When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'pheno')")
     LONG_STRING_PARAM("colname-geno-sample", &colname_geno_sample, "When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')")
     LONG_STRING_PARAM("colname-pair-trait", &colname_pair_trait, "Column name of the trait ID in the pait file")
@@ -419,6 +417,12 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     pl.Read(argc, argv);
     pl.Status();
     const char table_delim = table_delimiter(space_delim);
+    if ( !cat_cov_names.empty() && covf.empty() ) {
+        error("--cat-cov-names requires --cov");
+    }
+    if ( !cov_names.empty() && covf.empty() ) {
+        error("--cov-names requires --cov");
+    }
 
     // open the Plink file
     MultiPgenIdxReader mpr;
@@ -481,10 +485,13 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     if ( have_cov ) {
         notice("Loading covariate matrix from %s", covf.c_str());
         cov_matrix.add_missing_strs(missing_str);
+        cov_matrix.set_categorical_ids(split_comma_list(cat_cov_names));
+        cov_matrix.set_selected_columns(expand_name_ranges(cov_names));
         if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str(), table_delim) ) {
             error("Failed to load the covariate matrix from file %s", covf.c_str());
         }
         notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf.c_str());
+        cov_matrix.keep_covariate_columns(expand_name_ranges(cov_names), covf.c_str());
     }
 
     // overlap of the sample, genotype, covariate, and phenotype files
@@ -535,6 +542,12 @@ int32_t cmd_pair_assoc(int32_t argc, char **argv)
     if ( have_cov && cov_matrix.samp_ids != overlapping_sample_ids ) {
         notice("Subsetting the covariate matrix to the overlapping samples");
         cov_matrix.subset_sample_ids(overlapping_sample_ids);
+    }
+    // categorical covariates become indicator columns, with levels counted on the analyzed samples
+    // (as in rect-assoc and region-assoc)
+    if ( have_cov && cov_matrix.has_categorical() ) {
+        cov_matrix.expand_categorical(max_cat_levels);
+        notice("Covariate matrix has %zu columns after expanding categorical covariates", cov_matrix.pheno_ids.size());
     }
     if ( mpr.get_all_sample_count() != (int32_t)overlapping_sample_ids.size() ) { // same size => same order, as overlapping_sample_ids follows genotype order
         notice("Subsetting the genotype data to %zu overlapping samples", overlapping_sample_ids.size());

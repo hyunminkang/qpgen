@@ -143,6 +143,9 @@ public:
     PhenoMatrix cov_matrix;   // covariate matrix
     std::vector<std::string> overlapping_sample_ids; // overlapping sample IDs among genotype, phenotype, and covariate files
     char table_delim;      // delimiter of the user-supplied tables (see table_delimiter())
+    std::vector<std::string> cat_cov_ids; // categorical covariates (--cat-cov-names)
+    std::vector<std::string> cov_col_ids; // covariates to use (--cov-names); empty = all
+    int32_t max_cat_levels;               // maximum number of levels of a categorical covariate
     int32_t jump_thres_bp; // jump threshold in base pairs for the multi-pgen reader
     int32_t icol_pivar_idx; // column index for the variant ID in the pivar file
     std::vector<std::string> subset_sample_ids;
@@ -208,6 +211,7 @@ public:
 
     ind_assoc_input() {
         table_delim = '\t';
+        max_cat_levels = 10;
         jump_thres_bp = 1000000;
         icol_pivar_idx = 8;
         rint_before_adj = false;
@@ -268,6 +272,13 @@ public:
     // delimiter of the phenotype/covariate matrices and the sample/trait lists (table_delimiter());
     // set it before the set_subset_*_file() calls
     inline void set_table_delimiter(char delim) { table_delim = delim; }
+    // categorical covariates, expanded to indicator columns (see PhenoMatrix::expand_categorical())
+    // covariates to use (plus the categorical ones); empty = all columns of --cov
+    inline void set_covariate_columns(const std::vector<std::string>& ids) { cov_col_ids = ids; }
+    inline void set_categorical_covariates(const std::vector<std::string>& ids, int32_t max_levels) {
+        cat_cov_ids = ids;
+        max_cat_levels = max_levels;
+    }
 
     inline void set_subset_sample_file(const char* samplef) {
         if ( is_pheno_loaded() ) {
@@ -287,14 +298,15 @@ public:
         subset_sample_ids = samp_ids;
     }
 
-    inline void set_subset_pheno_file(const char* phenof, int32_t icol_pheno_id = 1) {
+    // trait IDs, one per line (first column)
+    inline void set_subset_pheno_file(const char* phenof) {
         if ( is_pheno_loaded() ) {
             error("Cannot set subset phenotype file after the phenotype matrix is loaded");
         }
         tsv_reader tr_pheno(phenof);
         tr_pheno.delimiter = table_delim;
         while(tr_pheno.read_line()) {
-            subset_pheno_ids.push_back(tr_pheno.str_field_at(icol_pheno_id - 1));
+            subset_pheno_ids.push_back(tr_pheno.str_field_at(0));
         }
     }
 

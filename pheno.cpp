@@ -37,6 +37,13 @@ void check_header_fields(int32_t nfields, int32_t icol_data, char delim, const c
     }
 }
 
+std::vector<std::string> pick_strs(const std::vector<std::string>& v, const std::vector<int32_t>& idx) {
+    std::vector<std::string> out;
+    out.reserve(idx.size());
+    for(int32_t i : idx) out.push_back(v[i]);
+    return out;
+}
+
 } // anonymous namespace
 
 bool PhenoMatrix::subset_sample_pheno_indices(const std::vector<int32_t>& samp_indices, const std::vector<int32_t>& pheno_indices) {
@@ -87,6 +94,13 @@ bool PhenoMatrix::subset_sample_pheno_indices(const std::vector<int32_t>& samp_i
             pheno_mask_sub(i,j) = pheno_mask(sidx, pidx);
         }
     }
+    if ( !cat_strs.empty() ) {
+        std::vector<std::vector<std::string> > cat_sub(pheno_indices.size());
+        for(size_t j = 0; j < pheno_indices.size(); ++j) {
+            if ( !cat_strs[pheno_indices[j]].empty() ) cat_sub[j] = pick_strs(cat_strs[pheno_indices[j]], samp_indices);
+        }
+        cat_strs.swap(cat_sub);
+    }
     pheno_mat = pheno_mat_sub;
     pheno_mask = pheno_mask_sub;
     this->samp_ids = samp_ids_sub;
@@ -130,6 +144,11 @@ int32_t PhenoMatrix::subset_pheno_indices(const std::vector<int32_t>& pheno_indi
         pheno_mat_sub.col(j) = pheno_mat.col( idx );
         pheno_mask_sub.col(j) = pheno_mask.col( idx );
     }
+    if ( !cat_strs.empty() ) {
+        std::vector<std::vector<std::string> > cat_sub(pheno_indices.size());
+        for(size_t j = 0; j < pheno_indices.size(); ++j) cat_sub[j] = cat_strs[pheno_indices[j]];
+        cat_strs.swap(cat_sub);
+    }
     pheno_mat = pheno_mat_sub;
     pheno_mask = pheno_mask_sub;
     this->pheno_ids = pheno_ids_sub;
@@ -168,6 +187,9 @@ int32_t PhenoMatrix::subset_sample_indices(const std::vector<int32_t>& samp_indi
         samp_ids_sub.push_back( samp_ids[idx] );
         pheno_mat_sub.row(i) = pheno_mat.row( idx );
         pheno_mask_sub.row(i) = pheno_mask.row( idx );
+    }
+    for(std::vector<std::string>& v : cat_strs) {
+        if ( !v.empty() ) v = pick_strs(v, samp_indices);
     }
     pheno_mat = pheno_mat_sub;
     pheno_mask = pheno_mask_sub;
@@ -308,6 +330,12 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
                 notice("Loading %d traits from phenotype matrix", ntraits);
                 pheno_mat.resize(nrow_est, ntraits);
                 pheno_mask.resize(nrow_est, ntraits);
+                if ( !cat_ids.empty() || !selected_ids.empty() ) {
+                    cat_strs.assign(ntraits, std::vector<std::string>());
+                    for(int32_t j = 0; j < ntraits; ++j) {
+                        if ( is_text_column(pheno_ids[j]) ) cat_strs[j].reserve(nrow_est);
+                    }
+                }
                 ++nlines;
             }
             else {
@@ -323,10 +351,17 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
                 }
                 samp_ids.push_back( std::string(tr.str_field_at(icol_indid)) );
                 for ( int32_t i = icol_data; i < nfields; ++i ) {
+                    const bool is_cat = !cat_strs.empty() && is_text_column(pheno_ids[i - icol_data]);
                     if ( is_missing( tr.str_field_at(i) ) ) {
                         pheno_mask(nsamps, i - icol_data) = false;
                         pheno_mat(nsamps, i - icol_data) = 0;
                         has_missing = true;
+                        if ( is_cat ) cat_strs[i - icol_data].push_back("");
+                    }
+                    else if ( is_cat ) { // a categorical level: any string
+                        pheno_mask(nsamps, i - icol_data) = true;
+                        pheno_mat(nsamps, i - icol_data) = 0;
+                        cat_strs[i - icol_data].push_back(tr.str_field_at(i));
                     }
                     else {
                         pheno_mask(nsamps, i - icol_data) = true;
@@ -344,6 +379,11 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
 
         rebuild_id2index_map(samp_ids, samp_id2idx);
         rebuild_id2index_map(pheno_ids, pheno_id2idx);
+        for(const std::string& id : cat_ids) {
+            if ( pheno_id2idx.find(id) == pheno_id2idx.end() ) {
+                error("Categorical covariate %s (--cat-cov-names) is not in %s", id.c_str(), pheno_file);
+            }
+        }
         return true;
     }
     else if ( format.compare("tsv-sample-col") == 0 ||
@@ -417,11 +457,22 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
                     pheno_loci.push_back( genomeLocus(chrom, beg1, end0) );
                     pheno_locusmap.add(chrom, beg1, end0, ntraits);
                 }
+                const bool is_cat = is_text_column(pheno_ids.back());
+                if ( !cat_ids.empty() || !selected_ids.empty() ) {
+                    cat_strs.push_back(std::vector<std::string>());
+                    if ( is_cat ) cat_strs.back().reserve(nsamps);
+                }
                 for ( int32_t i = icol_data; i < nfields; ++i ) {
                     if ( is_missing( tr.str_field_at(i) ) ) {
                         pheno_mask(i - icol_data, ntraits) = false;
                         pheno_mat(i - icol_data, ntraits) = 0;
                         has_missing = true;
+                        if ( is_cat ) cat_strs.back().push_back("");
+                    }
+                    else if ( is_cat ) { // a categorical level: any string
+                        pheno_mask(i - icol_data, ntraits) = true;
+                        pheno_mat(i - icol_data, ntraits) = 0;
+                        cat_strs.back().push_back(tr.str_field_at(i));
                     }
                     else {
                         pheno_mask(i - icol_data, ntraits) = true;
@@ -438,12 +489,89 @@ bool PhenoMatrix::load_pheno_matrix(const char* pheno_file, const char* pheno_fo
 
         rebuild_id2index_map(samp_ids, samp_id2idx);
         rebuild_id2index_map(pheno_ids, pheno_id2idx);
+        for(const std::string& id : cat_ids) {
+            if ( pheno_id2idx.find(id) == pheno_id2idx.end() ) {
+                error("Categorical covariate %s (--cat-cov-names) is not in %s", id.c_str(), pheno_file);
+            }
+        }
         return true;
     }
     else {
         error("Unsupported phenotype format: %s", pheno_format);
         return false;
     }
+}
+
+void PhenoMatrix::keep_covariate_columns(const std::vector<std::string>& cov_names, const char* file) {
+    if ( cov_names.empty() ) return;
+    std::set<std::string> keep(cov_names.begin(), cov_names.end());
+    for(const std::string& id : cov_names) {
+        if ( pheno_id2idx.find(id) == pheno_id2idx.end() ) {
+            error("Covariate %s (--cov-names) is not in %s", id.c_str(), file);
+        }
+    }
+    keep.insert(cat_ids.begin(), cat_ids.end());
+    std::vector<int32_t> idx;
+    for(int32_t j = 0; j < (int32_t)pheno_ids.size(); ++j) {
+        if ( keep.count(pheno_ids[j]) ) idx.push_back(j);
+    }
+    notice("Using %zu of %zu covariates in %s (--cov-names and --cat-cov-names)", idx.size(), pheno_ids.size(), file);
+    subset_pheno_indices(idx);
+}
+
+int32_t PhenoMatrix::expand_categorical(int32_t max_levels) {
+    if ( !has_categorical() ) { cat_strs.clear(); return 0; }
+    const Eigen::Index n = pheno_mat.rows();
+    std::vector<std::string> new_ids;
+    std::vector<Eigen::VectorXd> new_cols;
+    std::vector<Eigen::Matrix<bool, Eigen::Dynamic, 1> > new_masks;
+    int32_t n_indicators = 0;
+    for(size_t j = 0; j < pheno_ids.size(); ++j) {
+        if ( cat_strs[j].empty() ) { // numeric column
+            new_ids.push_back(pheno_ids[j]);
+            new_cols.push_back(pheno_mat.col(j));
+            new_masks.push_back(pheno_mask.col(j));
+            continue;
+        }
+        std::set<std::string> levels;
+        for(Eigen::Index i = 0; i < n; ++i) {
+            if ( pheno_mask(i, j) ) levels.insert(cat_strs[j][i]);
+        }
+        if ( (int32_t)levels.size() > max_levels ) {
+            error("Categorical covariate %s has %zu levels among the analyzed samples, more than --max-cat-levels %d",
+                  pheno_ids[j].c_str(), levels.size(), max_levels);
+        }
+        std::string level_list;
+        for(const std::string& l : levels) level_list += ( level_list.empty() ? "" : ", " ) + l;
+        if ( levels.size() < 2 ) {
+            warning("Categorical covariate %s has %zu level(s) among the analyzed samples (%s) and is dropped",
+                    pheno_ids[j].c_str(), levels.size(), level_list.c_str());
+            continue;
+        }
+        notice("Categorical covariate %s: %zu levels (%s); reference %s; %zu indicator columns",
+               pheno_ids[j].c_str(), levels.size(), level_list.c_str(), levels.begin()->c_str(), levels.size() - 1);
+        for(std::set<std::string>::const_iterator it = std::next(levels.begin()); it != levels.end(); ++it) {
+            Eigen::VectorXd col(n);
+            for(Eigen::Index i = 0; i < n; ++i) col(i) = ( pheno_mask(i, j) && cat_strs[j][i] == *it ) ? 1.0 : 0.0;
+            new_ids.push_back(pheno_ids[j] + "_" + *it);
+            new_cols.push_back(col);
+            new_masks.push_back(pheno_mask.col(j));
+            ++n_indicators;
+        }
+    }
+    pheno_mat.resize(n, new_cols.size());
+    pheno_mask.resize(n, new_cols.size());
+    for(size_t j = 0; j < new_cols.size(); ++j) {
+        pheno_mat.col(j) = new_cols[j];
+        pheno_mask.col(j) = new_masks[j];
+    }
+    pheno_ids.swap(new_ids);
+    has_loci = false;
+    pheno_loci.clear();
+    cat_strs.clear();
+    rebuild_id2index_map(pheno_ids, pheno_id2idx);
+    recompute_has_missing();
+    return n_indicators;
 }
 
 bool PhenoMatrix::sample_ids_sorted() const {

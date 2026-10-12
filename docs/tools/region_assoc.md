@@ -43,6 +43,9 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
 
 ## Additional Options
 
+* `--cov-names` : Comma-separated covariates (column names in `--cov`) to use, as REGENIE's `--covarColList`. Ranges such as `PC{1:10}` are expanded. Covariates in `--cat-cov-names` are always used. Other columns are ignored and not parsed, so they may hold text. Default: all columns. See [Categorical and selected covariates](../formats/phenotypes.md#categorical-and-selected-covariates).
+* `--cat-cov-names` : Comma-separated covariates to treat as categorical, as REGENIE's `--catCovarList`. Their values may be any strings. A covariate with L levels among the analyzed samples is replaced by L-1 indicator columns.
+* `--max-cat-levels` : Maximum number of levels of a categorical covariate, as REGENIE's `--maxCatLevels` (default: 10). More levels stop the run.
 * `--space-delim` : Read input tables (phenotype/covariate matrices, pair files, sample/trait/variant lists) as delimited by single spaces instead of tabs (default: tab-delimited). See [Phenotype file formats](../formats/phenotypes.md#delimiters).
 ### Input and sample handling
 
@@ -55,8 +58,6 @@ qpgentools region-assoc --pgen-list [list] --pheno [pheno] --cov [cov] \
 * `--missing-str` : Comma-separated strings marking missing phenotype or covariate values (default: `NA`). All tested traits must share one set of samples, so missing phenotype values are allowed only when a single trait is tested. In that case, samples with a missing value are excluded before sample matching, so covariate adjustment, genotype residualization, RINT, LOCO, and the exported statistics all use the observed samples, and `N`/`n` report that count. With several tested traits, a missing value in any of them stops the run. Missing covariate values are not supported.
 * `--colname-pheno-sample` / `--colname-geno-sample` : When `--sample` is provided, the column names holding the phenotype-side and genotype-side sample IDs (defaults: `pheno` and `geno`).
 * `--icol-pivar-idx` : 1-based column index for the variant index in the indexed pvar file (default: 9).
-* `--icol-pheno-id` / `--icol-cov-id` : 1-based column index for the phenotype/covariate ID (default: 1).
-* `--offset-pheno` / `--offset-cov` : The number of leading index columns (i.e. not containing values) in the phenotype/covariate file (default: 1).
 
 ### Variant filters
 
@@ -527,8 +528,11 @@ Available Options:
    --pheno-format         [STR: regenie]      : Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'
    --missing-str          [STR: NA]           : Comma-separated strings marking missing phenotype/covariate values (default: 'NA'). Missing phenotype values are allowed only when a single trait is tested; its samples with a missing value are excluded
    --cov-format           [STR: regenie]      : Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'
+   --cov-names            [STR: ]             : Comma-separated covariates (column names in --cov) to use, as REGENIE's --covarColList; ranges such as PC{1:10} are expanded. Covariates in --cat-cov-names are always used. Default: all columns
+   --cat-cov-names        [STR: ]             : Comma-separated covariates (column names in --cov) to treat as categorical, as REGENIE's --catCovarList. Their values may be any strings; each covariate with L levels among the analyzed samples is replaced by L-1 indicator columns (the first level in sorted order is the reference)
+   --max-cat-levels       [INT: 10]           : Maximum number of levels of a categorical covariate, as REGENIE's --maxCatLevels (default: 10)
    --traits               [STR: ]             : Trait IDs (comma-separated) to be tested (required)
-   --traitf               [STR: ]             : Input file containing trait IDs to be tested (one per line)
+   --traitf               [STR: ]             : Input file containing trait IDs to be tested (one per line; the first column is used)
    --region               [STR: ]             : Region string in the format CHROM:BEG-END (required)
    --min-af               [FLT: 0.00]         : Minimum allele frequency for variants to be tested (default: 0.0)
    --max-af               [FLT: 1.00]         : Maximum allele frequency for variants to be tested (default: 1.0)
@@ -549,11 +553,7 @@ Available Options:
 == Auxiliary options ==
    --jump-thres-bp        [INT: 1000000]      : Jump threshold in base pairs for the variant index (default: 1000000)
    --max-allowed-vars     [INT: 1000000]      : Maximum number of allowed variants to store at once in memory (default: 1000000)
-   --offset-pheno         [INT: 1]            : The number of index columns (i.e. not containing values) in the phenotype files (default: 1)
-   --offset-cov           [INT: 1]            : The number of index columns (i.e. not containing values) in the covariate columns (default: 1)
    --icol-pivar-idx       [INT: 9]            : 1-based column index for the variant ID in the pvar file (default: 9)
-   --icol-pheno-id        [INT: 1]            : 1-based column index for the phenotype ID in the phenotype file (default: 1)
-   --icol-cov-id          [INT: 1]            : 1-based column index for the covariate ID in the phenotype file (default: 1)
    --colname-pheno-sample [STR: pheno]        : When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'pheno')
    --colname-geno-sample  [STR: geno]         : When --sample is provided, the column name for the sample IDs in the phenotype file (default: 'geno')
    --rint-before-adj      [FLG: OFF]          : Perform rank-based inverse normal transformation before covariate adjustment (default: false)

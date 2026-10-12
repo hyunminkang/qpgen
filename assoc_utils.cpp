@@ -1318,10 +1318,13 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
 
     if ( covf != NULL && strlen(covf) > 0 ) {
         notice("Loading covariate matrix from %s", covf);
+        cov_matrix.set_categorical_ids(cat_cov_ids);
+        cov_matrix.set_selected_columns(cov_col_ids);
         if ( !cov_matrix.load_pheno_matrix(covf, cov_format, table_delim) ) {
             error("Failed to load the covariate matrix from file %s", covf);
         }
         notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf);
+        cov_matrix.keep_covariate_columns(cov_col_ids, covf);
     }
 
     // load the covariate matrix
@@ -1446,6 +1449,11 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
         else {
             notice("No need to subset the covariate matrix, as the sample IDs already match the overlapping samples");
         }
+        // categorical covariates become indicator columns, with levels counted on the analyzed samples
+        if ( cov_matrix.has_categorical() ) {
+            cov_matrix.expand_categorical(max_cat_levels);
+            notice("Covariate matrix has %zu columns after expanding categorical covariates", cov_matrix.pheno_ids.size());
+        }
     }
     if ( mpr.get_all_sample_count() != (int32_t)overlapping_sample_ids.size() ) { // same size => same order, as overlapping_sample_ids follows genotype order
         notice("Subsetting the genotype data to %zu overlapping samples", (int32_t)overlapping_sample_ids.size());
@@ -1468,6 +1476,15 @@ bool ind_assoc_input::load_pheno_cov_matrices(const char* phef, const char* phen
         else {
             error("Rank-based inverse normal transformation adjustment is currently only supported for phenotype matrices with missing values");
         }
+    }
+
+    // all traits share the analyzed samples here (region-assoc drops the missing samples of a
+    // single trait above), so a missing phenotype value cannot be handled
+    if ( pheno_matrix.has_missing ) {
+        error("The phenotype matrix has missing values. This command tests all traits on the same samples and needs complete phenotypes (pair-assoc handles missing values per trait)");
+    }
+    if ( covf != NULL && cov_matrix.has_missing ) {
+        error("The covariate matrix has missing values, which this command does not support. Remove the samples with missing covariates (pair-assoc excludes them)");
     }
 
     // perform covariate adjustment

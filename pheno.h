@@ -24,6 +24,18 @@ public:
     std::set<std::string> missing_strs; 
     std::map<std::string, int32_t> pheno_id2idx;
     std::map<std::string, int32_t> samp_id2idx;
+    // Categorical covariates (--cat-cov-names): their columns hold text levels in cat_strs (one
+    // string per sample, "" when missing) and 0 in pheno_mat until expand_categorical() turns
+    // them into indicator columns. cat_strs is empty when no column is categorical; otherwise it
+    // has one entry per column, empty for numeric columns.
+    std::set<std::string> cat_ids;
+    std::vector<std::vector<std::string> > cat_strs;
+    // --cov-names: when non-empty, other (non-categorical) columns are read as text without being
+    // parsed, and keep_covariate_columns() then drops them
+    std::set<std::string> selected_ids;
+    bool is_text_column(const std::string& id) const {
+        return cat_ids.count(id) > 0 || ( !selected_ids.empty() && selected_ids.count(id) == 0 );
+    }
 
     PhenoMatrix() : has_missing(false), has_loci(false) {}
     ~PhenoMatrix() {}
@@ -50,6 +62,20 @@ public:
     // missing. Returns the number of imputed cells.
     int64_t impute_missing(bool as_half_min);
     
+    // Keeps only the listed columns and the categorical ones, in file order (--cov-names). Aborts on
+    // a listed name that is not a column of file. No-op for an empty list.
+    void keep_covariate_columns(const std::vector<std::string>& cov_names, const char* file);
+    // the --cov-names columns, so that the other columns are not parsed (call before load_pheno_matrix)
+    void set_selected_columns(const std::vector<std::string>& ids) { selected_ids = std::set<std::string>(ids.begin(), ids.end()); }
+    // Columns to read as categorical (call before load_pheno_matrix); each must be in the file
+    void set_categorical_ids(const std::vector<std::string>& ids) { cat_ids = std::set<std::string>(ids.begin(), ids.end()); }
+    bool has_categorical() const { for(const std::vector<std::string>& v : cat_strs) if ( !v.empty() ) return true; return false; }
+    // Replaces each categorical column by L-1 indicator columns <id>_<level> for its L observed
+    // levels (sorted; the first is the reference), on the current samples. A missing value stays
+    // missing in every indicator. Aborts when a column has more than max_levels levels. Returns
+    // the number of indicator columns.
+    int32_t expand_categorical(int32_t max_levels);
+
     bool load_pheno_matrix(const char* pheno_file, const char* pheno_format, const char delim = '\t'); // delim: see table_delimiter()
     int32_t subset_sample_ids(const std::vector<std::string>& samp_ids);
     int32_t subset_pheno_ids(const std::vector<std::string>& pheno_ids);

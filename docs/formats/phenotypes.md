@@ -27,13 +27,39 @@ own formats and are not affected.
 
 ## Values and missing values
 
-Every value must be a number. A value that is not a number (for example sex coded as `XX`/`XY`,
-or `NA` in a command that does not take `--missing-str`) stops the run with an error, instead of
-being read as `0` as in earlier versions. Code categorical covariates as numbers.
+Every value must be a number, except in categorical covariates (below) and in covariate columns
+not selected with `--cov-names`. A value that is not a number (for example sex coded as `XX`/`XY`
+without `--cat-cov-names sex`) stops the run with an error, instead of being read as `0` as in
+earlier versions.
 
-`pair-assoc`, `region-assoc` and `match-prs-pheno` take `--missing-str` (default `NA`): a
-comma-separated list of strings that mark missing values. See each command's page for how
-missing values are handled. `rect-assoc` does not accept missing values.
+`pair-assoc`, `rect-assoc`, `region-assoc` and `match-prs-pheno` take `--missing-str` (default `NA`):
+a comma-separated list of strings that mark missing values. See each command's page for how
+missing values are handled; `rect-assoc` stops on any missing value.
+
+## Categorical and selected covariates
+
+`pair-assoc`, `rect-assoc` and `region-assoc` follow REGENIE's covariate options:
+
+* `--cov-names` (REGENIE `--covarColList`) selects the covariate columns to use, e.g.
+  `--cov-names "age,PC{1:10}"`; `PC{1:10}` expands to `PC1,...,PC10`. Columns in `--cat-cov-names`
+  are always used. The other columns are ignored, are not parsed, and their missing values do not
+  exclude samples. Without `--cov-names`, every column is used.
+* `--cat-cov-names` (REGENIE `--catCovarList`) lists categorical covariates. Their values may be any
+  strings, e.g. `XX`/`XY` or batch labels. After the samples are matched across the input files, a
+  covariate with L observed levels is replaced by L-1 indicator columns named `<covariate>_<level>`.
+  The levels are sorted as strings and the first is the reference. Which level is the reference
+  does not change any result, because the model has an intercept. A level that only excluded
+  samples have is not counted. A covariate with a single level is dropped with a warning, and
+  `--max-cat-levels` (REGENIE `--maxCatLevels`, default 10) caps the number of levels.
+* A missing value (`--missing-str`) in a used categorical covariate is a missing covariate:
+  `pair-assoc` excludes the sample, and `rect-assoc` and `region-assoc` stop.
+
+For example, with the MAGE covariate file, where sex is stored as `XX`/`XY`:
+
+```
+qpgentools pair-assoc ... --cov eQTL_covariates.tab.gz --cov-format tsv-sample-col \
+    --cat-cov-names sex --cov-names "PC{1:5},PEER{1:60}"
+```
 
 ## Regenie format
 
