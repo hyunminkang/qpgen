@@ -142,6 +142,9 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     std::string prs_format("regenie");
     std::string pheno_format("regenie");
     std::string cov_format("regenie");
+    std::string cov_names;      // covariates to use (--cov-names); empty = all
+    std::string cat_cov_names;  // categorical covariates (--cat-cov-names)
+    int32_t max_cat_levels = 10; // REGENIE's --maxCatLevels
     std::string missing_str("NA");  // comma-separated strings representing missing values
     bool cov_impute_mean = false;  // mean-impute missing covariates instead of dropping samples
     bool missing_as_mean = false;  // impute missing phenotypes with the trait mean instead of ignoring them
@@ -176,6 +179,9 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     LONG_STRING_PARAM("prs-format", &prs_format, "Format of the PRS file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("pheno-format", &pheno_format, "Format of the phenotype file (default: 'regenie'). Options: 'regenie', 'tensorqtl', 'tsv-sample-col', 'tsv-sample-row'")
     LONG_STRING_PARAM("cov-format", &cov_format, "Format of the covariate file (default: 'regenie'). Options: 'regenie', 'tsv-sample-col', 'tsv-sample-row'")
+    LONG_STRING_PARAM("cov-names", &cov_names, QPGEN_COV_NAMES_HELP)
+    LONG_STRING_PARAM("cat-cov-names", &cat_cov_names, QPGEN_CAT_COV_NAMES_HELP)
+    LONG_INT_PARAM("max-cat-levels", &max_cat_levels, QPGEN_MAX_CAT_LEVELS_HELP)
     LONG_STRING_PARAM("missing-str", &missing_str, "Comma-separated strings representing missing values in the phenotype and covariate matrices (default: 'NA'). The PRS matrix must not contain missing values")
 
     LONG_PARAM_GROUP("Output options", NULL)
@@ -211,6 +217,12 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     pl.Read(argc, argv);
     pl.Status();
     const char table_delim = table_delimiter(space_delim);
+    if ( !cat_cov_names.empty() && covf.empty() ) {
+        error("--cat-cov-names requires --cov");
+    }
+    if ( !cov_names.empty() && covf.empty() ) {
+        error("--cov-names requires --cov");
+    }
 
     // validate option combinations before reading any input
     if ( prsf.empty() || phef.empty() || outf.empty() ) {
@@ -300,10 +312,13 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
     if ( !covf.empty() ) {
         notice("Loading covariate matrix from %s", covf.c_str());
         cov_matrix.add_missing_strs(missing_str);
+        cov_matrix.set_categorical_ids(split_comma_list(cat_cov_names));
+        cov_matrix.set_selected_columns(expand_name_ranges(cov_names));
         if ( !cov_matrix.load_pheno_matrix(covf.c_str(), cov_format.c_str(), table_delim) ) {
             error("Failed to load the covariate matrix from file %s", covf.c_str());
         }
         notice("Loaded covariate matrix with %d samples and %d covariates from %s", (int32_t)cov_matrix.samp_ids.size(), (int32_t)cov_matrix.pheno_ids.size(), covf.c_str());
+        cov_matrix.keep_covariate_columns(expand_name_ranges(cov_names), covf.c_str());
     }
 
     // subset to overlapping phenotypes
@@ -372,43 +387,50 @@ int32_t cmd_match_prs_pheno(int32_t argc, char **argv)
         cov_matrix.subset_sample_ids(overlapping_samples);
         notice("Subsetted phenotype and covariate matrices to %d overlapping samples", (int32_t)overlapping_samples.size());
 
-        if ( cov_matrix.has_missing ) {
-            if ( cov_impute_mean ) {
-                // replace each missing covariate value with the mean of observed values in that column
-                int32_t n_imputed = 0;
-                for ( int32_t j = 0; j < cov_matrix.pheno_mat.cols(); ++j ) {
-                    double sum = 0.0;
-                    int32_t n_obs = 0;
-                    for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
-                        if ( cov_matrix.pheno_mask(i, j) ) { sum += cov_matrix.pheno_mat(i, j); ++n_obs; }
-                    }
-                    double mean = ( n_obs > 0 ) ? sum / (double)n_obs : 0.0;
-                    for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
-                        if ( !cov_matrix.pheno_mask(i, j) ) {
-                            cov_matrix.pheno_mat(i, j) = mean;
-                            cov_matrix.pheno_mask(i, j) = true;
-                            ++n_imputed;
-                        }
-                    }
-                }
-                cov_matrix.recompute_has_missing();
-                notice("Mean-imputed %d missing covariate values (--cov-impute-mean)", n_imputed);
+        // Without --cov-impute-mean, samples with a missing covariate are dropped first, so that
+        // categorical levels are counted on the retained samples. With it, the categorical
+        // covariates are expanded first, so that their indicator columns are imputed (with the
+        // level frequencies) rather than a missing value becoming a level.
+        if ( cov_matrix.has_missing && !cov_impute_mean ) {
+            // drop samples with any missing covariate from both matrices
+            std::vector<std::string> keep_ids;
+            for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
+                if ( cov_matrix.pheno_mask.row(i).all() ) keep_ids.push_back( cov_matrix.samp_ids[i] );
+                else dropped_samp_ids.insert( cov_matrix.samp_ids[i] );
             }
-            else {
-                // drop samples with any missing covariate from both matrices
-                std::vector<std::string> keep_ids;
+            if ( keep_ids.empty() ) {
+                error("All %d samples have at least one missing covariate value. Consider using --cov-impute-mean", (int32_t)cov_matrix.pheno_mat.rows());
+            }
+            pheno_matrix.subset_sample_ids(keep_ids);
+            cov_matrix.subset_sample_ids(keep_ids);
+            notice("Dropped %d samples with at least one missing covariate value; %d samples retained. These samples will not appear in the output. Use --cov-impute-mean to mean-impute missing covariates instead",
+                   (int32_t)dropped_samp_ids.size(), (int32_t)keep_ids.size());
+        }
+        // categorical covariates become indicator columns, with levels counted on the analyzed samples
+        if ( cov_matrix.has_categorical() ) {
+            cov_matrix.expand_categorical(max_cat_levels);
+            notice("Covariate matrix has %zu columns after expanding categorical covariates", cov_matrix.pheno_ids.size());
+        }
+        if ( cov_matrix.has_missing && cov_impute_mean ) {
+            // replace each missing covariate value with the mean of observed values in that column
+            int32_t n_imputed = 0;
+            for ( int32_t j = 0; j < cov_matrix.pheno_mat.cols(); ++j ) {
+                double sum = 0.0;
+                int32_t n_obs = 0;
                 for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
-                    if ( cov_matrix.pheno_mask.row(i).all() ) keep_ids.push_back( cov_matrix.samp_ids[i] );
-                    else dropped_samp_ids.insert( cov_matrix.samp_ids[i] );
+                    if ( cov_matrix.pheno_mask(i, j) ) { sum += cov_matrix.pheno_mat(i, j); ++n_obs; }
                 }
-                if ( keep_ids.empty() ) {
-                    error("All %d samples have at least one missing covariate value. Consider using --cov-impute-mean", (int32_t)cov_matrix.pheno_mat.rows());
+                double mean = ( n_obs > 0 ) ? sum / (double)n_obs : 0.0;
+                for ( int32_t i = 0; i < cov_matrix.pheno_mat.rows(); ++i ) {
+                    if ( !cov_matrix.pheno_mask(i, j) ) {
+                        cov_matrix.pheno_mat(i, j) = mean;
+                        cov_matrix.pheno_mask(i, j) = true;
+                        ++n_imputed;
+                    }
                 }
-                pheno_matrix.subset_sample_ids(keep_ids);
-                cov_matrix.subset_sample_ids(keep_ids);
-                notice("Dropped %d samples with at least one missing covariate value; %d samples retained. These samples will not appear in the output. Use --cov-impute-mean to mean-impute missing covariates instead",
-                       (int32_t)dropped_samp_ids.size(), (int32_t)keep_ids.size());
             }
+            cov_matrix.recompute_has_missing();
+            notice("Mean-imputed %d missing covariate values (--cov-impute-mean)", n_imputed);
         }
 
         notice("Adjusting phenotypes by covariates using linear regression");

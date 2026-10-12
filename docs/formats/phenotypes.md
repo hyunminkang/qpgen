@@ -38,7 +38,7 @@ missing values are handled; `rect-assoc` stops on any missing value.
 
 ## Categorical and selected covariates
 
-`pair-assoc`, `rect-assoc` and `region-assoc` follow REGENIE's covariate options:
+`pair-assoc`, `rect-assoc`, `region-assoc` and `match-prs-pheno` follow REGENIE's covariate options:
 
 * `--cov-names` (REGENIE `--covarColList`) selects the covariate columns to use, e.g.
   `--cov-names "age,PC{1:10}"`; `PC{1:10}` expands to `PC1,...,PC10`. Columns in `--cat-cov-names`
@@ -52,7 +52,9 @@ missing values are handled; `rect-assoc` stops on any missing value.
   samples have is not counted. A covariate with a single level is dropped with a warning, and
   `--max-cat-levels` (REGENIE `--maxCatLevels`, default 10) caps the number of levels.
 * A missing value (`--missing-str`) in a used categorical covariate is a missing covariate:
-  `pair-assoc` excludes the sample, and `rect-assoc` and `region-assoc` stop.
+  `pair-assoc` excludes the sample, and `rect-assoc` and `region-assoc` stop. `match-prs-pheno`
+  excludes the sample, or with `--cov-impute-mean` imputes each indicator column with the level
+  frequencies.
 
 For example, with the MAGE covariate file, where sex is stored as `XX`/`XY`:
 
